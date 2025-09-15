@@ -44,11 +44,12 @@ class SmolConfig:
     norm_eps: float = 1e-5
 
     # Projections / activations
-    tie_embeddings: bool = True
+    tie_embeddings: bool = False
     qkv_proj_bias: bool = False
     out_proj_bias: bool = False
     mlp_activation: str = "silu"  # "silu" or "gelu"
     gated_mlp: bool = True         # True -> SwiGLU (SiLU-Gated)
+    mlp_bias: bool = False
 
     # Initialization
     init_std: float = 0.02
@@ -82,68 +83,54 @@ class RMSNorm(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    """RoPE with cached cos/sin up to max_seq_len.
-
-    We support partial RoPE via rope_dim < head_dim (residual dims pass-through).
+    """
+    HF-compatible RoPE for LLaMA-style models.
+    Applies rotation to the first rope_dim of q,k.
     """
     def __init__(self, head_dim: int, max_seq_len: int, base: float = 10000.0, rope_dim: Optional[int] = None):
         super().__init__()
         self.head_dim = head_dim
         self.rope_dim = rope_dim if rope_dim is not None else head_dim
-        self.max_seq_len = max_seq_len
-        self.base = base
-        # build frequency
         inv_freq = 1.0 / (base ** (torch.arange(0, self.rope_dim, 2).float() / self.rope_dim))
-        t = torch.arange(self.max_seq_len, dtype=torch.float32)
-        freqs = torch.einsum('i,j->ij', t, inv_freq)  # [T, rope_dim/2]
-        emb = torch.cat((freqs, freqs), dim=-1)  # [T, rope_dim]
-        self.register_buffer('cos_cached', emb.cos(), persistent=False)
-        self.register_buffer('sin_cached', emb.sin(), persistent=False)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, positions: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary to the first rope_dim of q,k.
-        q,k: [B, T, n_h, h_d]
-        positions: optional [B, T] absolute positions; if None, uses arange(T).
-        """
-        if self.rope_dim == 0:
-            return q, k
-        
-        B, T, H, D = q.shape
-        rope_dim = min(self.rope_dim, D)
-        
-        # Get cos and sin values
-        if positions is None:
-            # Simple case: use sequence positions
-            cos = self.cos_cached[:T, :rope_dim]  # [T, rope_dim]
-            sin = self.sin_cached[:T, :rope_dim]  # [T, rope_dim]
-            cos = cos.unsqueeze(0).unsqueeze(2)  # [1, T, 1, rope_dim]
-            sin = sin.unsqueeze(0).unsqueeze(2)  # [1, T, 1, rope_dim]
-        else:
-            # Use provided positions [B, T]
-            cos = F.embedding(positions, self.cos_cached)[:, :, :rope_dim]  # [B, T, rope_dim]
-            sin = F.embedding(positions, self.sin_cached)[:, :, :rope_dim]  # [B, T, rope_dim]
-            cos = cos.unsqueeze(2)  # [B, T, 1, rope_dim]
-            sin = sin.unsqueeze(2)  # [B, T, 1, rope_dim]
-        
-        # Split into rotary and pass-through parts
-        q_rot, q_pass = q[..., :rope_dim], q[..., rope_dim:]
-        k_rot, k_pass = k[..., :rope_dim], k[..., rope_dim:]
-        
-        # Apply RoPE rotation using the standard rotation formula
-        def rotate_half(x):
-            # Split x into two halves and swap them with a sign flip on the second half
-            # x: [..., rope_dim] -> [..., rope_dim//2, 2] -> [..., rope_dim] 
-            x = x.view(*x.shape[:-1], rope_dim // 2, 2)
-            x1, x2 = x[..., 0], x[..., 1]  # [..., rope_dim//2] each
-            return torch.cat([-x2, x1], dim=-1)  # [..., rope_dim]
-        
-        q_rot = q_rot * cos + rotate_half(q_rot) * sin
-        k_rot = k_rot * cos + rotate_half(k_rot) * sin
-        
-        # Concatenate rotated and non-rotated parts
-        q = torch.cat([q_rot, q_pass], dim=-1)
-        k = torch.cat([k_rot, k_pass], dim=-1)
-        
+    def _cos_sin(self, seqlen: int, device, dtype):
+        t = torch.arange(seqlen, device=device, dtype=torch.float32)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [T, rope_dim/2]
+        cos = freqs.cos().to(dtype)
+        sin = freqs.sin().to(dtype)
+        return cos, sin  # [T, D/2]
+
+    @staticmethod
+    def _rotate_half(x):  # x[..., D]
+        x_even = x[..., ::2]
+        x_odd  = x[..., 1::2]
+        return torch.stack((-x_odd, x_even), dim=-1).flatten(-2)  # [-x1, x0] interleave
+
+    def _apply_one(self, x, cos, sin, pos_ids=None):
+        x_rope, x_pass = x[..., :self.rope_dim], x[..., self.rope_dim:]
+        if pos_ids is not None:
+            cos = F.embedding(pos_ids, cos)  # [B,T,D/2]
+            sin = F.embedding(pos_ids, sin)
+        # broadcast to [B,T,1,D/2]
+        cos = cos.unsqueeze(2)
+        sin = sin.unsqueeze(2)
+        # interleave back to D by duplicating cos/sin across pairs
+        x_cos = torch.empty_like(x_rope)
+        x_cos[..., ::2] = cos
+        x_cos[..., 1::2] = cos
+        x_sin = torch.empty_like(x_rope)
+        x_sin[..., ::2] = sin
+        x_sin[..., 1::2] = sin
+        x_applied = (x_rope * x_cos) + (self._rotate_half(x_rope) * x_sin)
+        return torch.cat([x_applied, x_pass], dim=-1)
+
+    def forward(self, q, k, positions: Optional[torch.Tensor] = None):
+        # q,k: [B, T, H, hd]
+        T = q.size(1)
+        cos, sin = self._cos_sin(T, q.device, q.dtype)  # [T, D/2]
+        q = self._apply_one(q, cos, sin, positions)
+        k = self._apply_one(k, cos, sin, positions)
         return q, k
 
 
@@ -154,11 +141,12 @@ class MLP(nn.Module):
         self.act = F.silu if act == "silu" else F.gelu
         self.gated = cfg.gated_mlp
         hidden = cfg.d_ff
+        use_bias = cfg.mlp_bias
         if self.gated:
-            self.w1 = nn.Linear(cfg.d_model, hidden * 2, bias=True)
+            self.w1 = nn.Linear(cfg.d_model, hidden * 2, bias=use_bias)
         else:
-            self.w1 = nn.Linear(cfg.d_model, hidden, bias=True)
-        self.w2 = nn.Linear(hidden, cfg.d_model, bias=True)
+            self.w1 = nn.Linear(cfg.d_model, hidden, bias=use_bias)
+        self.w2 = nn.Linear(hidden, cfg.d_model, bias=use_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.gated:

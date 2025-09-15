@@ -11,3 +11,4 @@ Repo Layout
 - scripts/     — small utilities (schema dump, conversions)
 - configs/     — experiment configs
 - artifacts/   — outputs (logs, checkpoints, reports) [gitignored]
+- test/        — minimal smoke tests (e.g. generate from pretrained) for each model
