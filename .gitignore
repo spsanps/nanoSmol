@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.env
+.env.*
+.venv/
+venv/
+pip-wheel-metadata/
+site/
+dist/
+build/
+*.egg-info/
+*.egg
+.ipynb_checkpoints/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.dmypy.json
+.pyre/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs & runs
+logs/
+runs/
+wandb/
+lightning_logs/
+events.out.tfevents*
+
+# Checkpoints & weights
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+
+# Data & caches
+data/
+datasets/
+.cache/
+.huggingface/
+transformers_cache/
+torch_cache/
+tokenizers_cache/
+hf_cache/
+
+# Outputs & artifacts
+artifacts/
+outputs/
+reports/
+
+# Temporary
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
