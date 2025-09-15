@@ -107,32 +107,43 @@ class RotaryEmbedding(nn.Module):
         """
         if self.rope_dim == 0:
             return q, k
+        
         B, T, H, D = q.shape
-        rope_dim = self.rope_dim
-        # get cos/sin
+        rope_dim = min(self.rope_dim, D)
+        
+        # Get cos and sin values
         if positions is None:
-            cos = self.cos_cached[:T, :].unsqueeze(1).unsqueeze(2)  # [T,1,1,rope_dim]
-            sin = self.sin_cached[:T, :].unsqueeze(1).unsqueeze(2)
+            # Simple case: use sequence positions
+            cos = self.cos_cached[:T, :rope_dim]  # [T, rope_dim]
+            sin = self.sin_cached[:T, :rope_dim]  # [T, rope_dim]
+            cos = cos.unsqueeze(0).unsqueeze(2)  # [1, T, 1, rope_dim]
+            sin = sin.unsqueeze(0).unsqueeze(2)  # [1, T, 1, rope_dim]
         else:
-            # positions: [B, T]
-            cos = F.embedding(positions, self.cos_cached)  # [B,T,rope_dim]
-            sin = F.embedding(positions, self.sin_cached)
-            cos = cos.unsqueeze(2)  # [B,T,1,rope_dim]
-            sin = sin.unsqueeze(2)
-        # split
-        q1, q2 = q[..., :rope_dim], q[..., rope_dim:]
-        k1, k2 = k[..., :rope_dim], k[..., rope_dim:]
-        # rotate (x0,x1) -> (x0*cos - x1*sin, x0*sin + x1*cos)
-        q1_2 = q1.view(*q1.shape[:-1], rope_dim // 2, 2)
-        k1_2 = k1.view(*k1.shape[:-1], rope_dim // 2, 2)
-        cos = cos.view(*q1_2.shape[:-1], 1)
-        sin = sin.view(*q1_2.shape[:-1], 1)
-        q_rot = torch.cat([q1_2[..., 0:1] * cos - q1_2[..., 1:2] * sin,
-                           q1_2[..., 0:1] * sin + q1_2[..., 1:2] * cos], dim=-2).reshape_as(q1)
-        k_rot = torch.cat([k1_2[..., 0:1] * cos - k1_2[..., 1:2] * sin,
-                           k1_2[..., 0:1] * sin + k1_2[..., 1:2] * cos], dim=-2).reshape_as(k1)
-        q = torch.cat([q_rot, q2], dim=-1)
-        k = torch.cat([k_rot, k2], dim=-1)
+            # Use provided positions [B, T]
+            cos = F.embedding(positions, self.cos_cached)[:, :, :rope_dim]  # [B, T, rope_dim]
+            sin = F.embedding(positions, self.sin_cached)[:, :, :rope_dim]  # [B, T, rope_dim]
+            cos = cos.unsqueeze(2)  # [B, T, 1, rope_dim]
+            sin = sin.unsqueeze(2)  # [B, T, 1, rope_dim]
+        
+        # Split into rotary and pass-through parts
+        q_rot, q_pass = q[..., :rope_dim], q[..., rope_dim:]
+        k_rot, k_pass = k[..., :rope_dim], k[..., rope_dim:]
+        
+        # Apply RoPE rotation using the standard rotation formula
+        def rotate_half(x):
+            # Split x into two halves and swap them with a sign flip on the second half
+            # x: [..., rope_dim] -> [..., rope_dim//2, 2] -> [..., rope_dim] 
+            x = x.view(*x.shape[:-1], rope_dim // 2, 2)
+            x1, x2 = x[..., 0], x[..., 1]  # [..., rope_dim//2] each
+            return torch.cat([-x2, x1], dim=-1)  # [..., rope_dim]
+        
+        q_rot = q_rot * cos + rotate_half(q_rot) * sin
+        k_rot = k_rot * cos + rotate_half(k_rot) * sin
+        
+        # Concatenate rotated and non-rotated parts
+        q = torch.cat([q_rot, q_pass], dim=-1)
+        k = torch.cat([k_rot, k_pass], dim=-1)
+        
         return q, k
 
 
