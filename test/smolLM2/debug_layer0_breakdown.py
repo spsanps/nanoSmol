@@ -38,19 +38,17 @@ def map_hf_config_to_smol(cfg_hf, pad_id: int) -> SmolConfig:
     return SmolConfig(
         vocab_size=int(_get("vocab_size")),
         d_model=int(_get("hidden_size", _get("n_embd"))),
-        n_layer=int(_get("num_hidden_layers", _get("n_layer"))),
-        n_head=int(_get("num_attention_heads", _get("n_head"))),
-        n_kv_head=int(_get("num_key_value_heads", _get("num_attention_heads"))),
+        n_layers=int(_get("num_hidden_layers", _get("n_layer"))),
+        n_heads=int(_get("num_attention_heads", _get("n_head"))),
+        n_kv_heads=int(_get("num_key_value_heads", _get("num_attention_heads"))),
         d_ff=int(_get("intermediate_size", 4 * int(_get("hidden_size", _get("n_embd"))))),
         max_seq_len=int(_get("max_position_embeddings", 4096)),
-        rope_base=float(_get("rope_theta", _get("rope_base", 10000.0))),
-        rope_pct=1.0,
+        rope_theta=float(_get("rope_theta", _get("rope_base", 10000.0))),
         dropout=0.0,
         norm_eps=float(_get("rms_norm_eps", _get("layer_norm_eps", 1e-6))),
         tie_embeddings=bool(_get("tie_word_embeddings", True)),
-        qkv_proj_bias=False, out_proj_bias=False,
-        mlp_activation="silu", gated_mlp=True, mlp_bias=False,
-        init_std=0.02, pad_token_id=pad_id,
+        init_std=0.02,
+        pad_token_id=pad_id,
     )
 
 @torch.no_grad()
@@ -145,7 +143,7 @@ def main():
     # embeddings -> LN1 (fp32 inside HF LN)
         x_my = mine.tok_emb(input_ids)
         x_hf = hf.model.embed_tokens(input_ids)
-        ln1_my = mine.blocks[0].ln1(x_my)
+        ln1_my = mine.blocks[0].ln_attn(x_my)
         ln1_hf = hf.model.layers[0].input_layernorm(x_hf)
         print("LN1 max Δ:", (ln1_my - ln1_hf).abs().max().item())
 
@@ -205,17 +203,17 @@ def main():
     positions = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
     x_my = mine.tok_emb(input_ids)
     in0_my = mine.drop(x_my)
-    ln1_my = mine.blocks[0].ln1(in0_my)
+    ln1_my = mine.blocks[0].ln_attn(in0_my)
 
     h  = mine.cfg.n_head
     hk = mine.cfg.n_kv_head
     hd = mine.cfg.head_dim()
 
-    q = mine.blocks[0].attn.q_proj(ln1_my).view(B, T, h, hd).permute(0,2,1,3)   # [B,h,T,hd]
-    k = mine.blocks[0].attn.k_proj(ln1_my).view(B, T, hk, hd).permute(0,2,1,3)
-    v = mine.blocks[0].attn.v_proj(ln1_my).view(B, T, hk, hd).permute(0,2,1,3)
+    q = mine.blocks[0].attn.q_proj(ln1_my).view(B, T, h, hd).permute(0, 2, 1, 3)   # [B,h,T,hd]
+    k = mine.blocks[0].attn.k_proj(ln1_my).view(B, T, hk, hd).permute(0, 2, 1, 3)
+    v = mine.blocks[0].attn.v_proj(ln1_my).view(B, T, hk, hd).permute(0, 2, 1, 3)
     # RoPE (your module expects [B,T,H,hd], so permute back temporarily)
-    q_r, k_r = mine.blocks[0].attn.rope(q.permute(0,2,1,3), k.permute(0,2,1,3), positions=positions)
+    q_r, k_r = mine.blocks[0].attn.rotary(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), positions=positions)
     q_r, k_r = q_r.permute(0,2,1,3), k_r.permute(0,2,1,3)
     if hk != h:
         rep = h // hk
@@ -230,7 +228,7 @@ def main():
     attn_out_my = attn_out_my.to(q.dtype).transpose(1,2).contiguous().view(B, T, h*hd)
     oproj_my = mine.blocks[0].attn.o_proj(attn_out_my)
     resid1_my = in0_my + mine.blocks[0].attn.resid_dropout(oproj_my)
-    ln2_my = mine.blocks[0].ln2(resid1_my)
+    ln2_my = mine.blocks[0].ln_mlp(resid1_my)
     mlp_my = mine.blocks[0].mlp(ln2_my)
     out_my = resid1_my + mlp_my
 
