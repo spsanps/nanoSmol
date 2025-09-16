@@ -17,13 +17,17 @@ class SmolLM2MLP(nn.Module):
 
     def __init__(self, cfg: SmolLM2Config) -> None:
         super().__init__()
-        hidden = cfg.d_ff
-        self.in_proj = nn.Linear(cfg.d_model, hidden * 2, bias=False)
-        self.out_proj = nn.Linear(hidden, cfg.d_model, bias=False)
+        hidden_dim = cfg.d_ff
+        self.in_proj = nn.Linear(cfg.d_model, hidden_dim * 2, bias=False)
+        self.out_proj = nn.Linear(hidden_dim, cfg.d_model, bias=False)
         self.dropout = nn.Dropout(cfg.dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate, up = self.in_proj(x).chunk(2, dim=-1)
-        x = F.silu(gate) * up
-        x = self.out_proj(x)
-        return self.dropout(x)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Run the SwiGLU feed-forward network used in SmolLM2."""
+
+        gate_values, candidate_values = self.in_proj(hidden_states).chunk(2, dim=-1)
+        # SwiGLU activation: silu(gate) provides a smooth gating curve that is
+        # multiplied with the candidate branch to introduce elementwise sparsity.
+        activated = F.silu(gate_values) * candidate_values
+        activated = self.out_proj(activated)
+        return self.dropout(activated)

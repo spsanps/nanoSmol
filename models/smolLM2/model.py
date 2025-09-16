@@ -19,8 +19,9 @@ class SmolLM2(nn.Module):
     def __init__(self, cfg: SmolLM2Config) -> None:
         super().__init__()
         self.cfg = cfg
+        # Token embedding layer converts token indices into dense vectors.
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        self.drop = nn.Dropout(cfg.dropout)
+        self.dropout = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList([SmolLM2Block(cfg) for _ in range(cfg.n_layers)])
         self.norm_out = RMSNorm(cfg.d_model, eps=cfg.norm_eps)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
@@ -28,6 +29,7 @@ class SmolLM2(nn.Module):
         if cfg.tie_embeddings:
             self._tie_lm_head_to_embedding()
 
+        # Populate parameters with the standard Gaussian initialisation.
         self.apply(self._init_weights)
 
     # ------------------------------------------------------------------ utils
@@ -43,6 +45,8 @@ class SmolLM2(nn.Module):
             nn.init.normal_(module.weight, mean=0.0, std=self.cfg.init_std)
 
     def num_parameters(self, trainable_only: bool = False) -> int:
+        """Return the number of parameters, optionally excluding frozen ones."""
+
         params = self.parameters() if not trainable_only else (p for p in self.parameters() if p.requires_grad)
         return sum(p.numel() for p in params)
 
@@ -60,14 +64,21 @@ class SmolLM2(nn.Module):
         seq_len: int,
         device: torch.device,
     ) -> tuple[Optional[torch.Tensor], torch.Tensor]:
+        """Build the masks/position ids expected by the attention modules."""
+
         if attention_mask is not None:
-            pad_mask = ~attention_mask.bool()
-            attn_mask = pad_mask[:, None, None, :]
+            # ``attention_mask`` follows the Hugging Face convention where
+            # ``1`` marks tokens to keep.  Flip the mask so ``True`` means
+            # "ignore"; expand dims to broadcast over heads and query tokens.
+            is_padding_position = ~attention_mask.bool()
+            attn_mask = is_padding_position[:, None, None, :]
             if position_ids is None:
+                # Create contiguous position ids that skip padding tokens.
                 position_ids = (attention_mask.long().cumsum(-1) - 1).clamp_min(0)
         else:
             attn_mask = None
             if position_ids is None:
+                # Default to simple [0, 1, 2, ...] positions for each sequence.
                 position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch, seq_len)
         return attn_mask, position_ids
 
@@ -77,15 +88,23 @@ class SmolLM2(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        B, T = input_ids.shape
-        attn_mask, position_ids = self._prepare_attention_inputs(attention_mask, position_ids, batch=B, seq_len=T, device=input_ids.device)
+        """Compute logits over the vocabulary for the provided token ids."""
 
-        x = self.tok_emb(input_ids)
-        x = self.drop(x)
+        batch_size, seq_len = input_ids.shape
+        attn_mask, position_ids = self._prepare_attention_inputs(
+            attention_mask,
+            position_ids,
+            batch=batch_size,
+            seq_len=seq_len,
+            device=input_ids.device,
+        )
+
+        hidden_states = self.tok_emb(input_ids)
+        hidden_states = self.dropout(hidden_states)
         for block in self.blocks:
-            x = block(x, attn_mask=attn_mask, position_ids=position_ids)
-        x = self.norm_out(x)
-        return self.lm_head(x)
+            hidden_states = block(hidden_states, attn_mask=attn_mask, position_ids=position_ids)
+        hidden_states = self.norm_out(hidden_states)
+        return self.lm_head(hidden_states)
 
     # ---------------------------------------------------------------- sampling
     @torch.no_grad()
@@ -97,14 +116,20 @@ class SmolLM2(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
     ) -> torch.Tensor:
+        """Autoregressively sample tokens from the model."""
+
+        # Switch to inference mode (disables dropout) while sampling.
         self.eval()
         for _ in range(max_new_tokens):
             logits = self(input_ids)[:, -1, :]
             logits = logits / max(temperature, 1e-6)
             if top_k is not None:
-                values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < values[:, [-1]]] = -float("inf")
+                topk_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                threshold = topk_values[:, [-1]]
+                # Filter logits so only the ``top_k`` candidates remain viable.
+                logits = logits.masked_fill(logits < threshold, -float("inf"))
             probs = F.softmax(logits, dim=-1)
+            # Sample the next token id according to the probability distribution.
             next_id = torch.multinomial(probs, num_samples=1)
             input_ids = torch.cat([input_ids, next_id], dim=1)
         return input_ids
@@ -219,6 +244,8 @@ def _cat_or_fetch(
     up: Optional[torch.Tensor],
     combined: Optional[torch.Tensor],
 ) -> Optional[torch.Tensor]:
+    """Return gate+up tensors if available, otherwise use the combined weight."""
+
     if gate is not None and up is not None:
         return torch.cat([gate, up], dim=0)
     return combined

@@ -24,11 +24,19 @@ class SmolLM2Block(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        hidden_states: torch.Tensor,
         *,
         attn_mask: Optional[torch.Tensor],
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        x = x + self.attn(self.ln_attn(x), attn_mask=attn_mask, position_ids=position_ids)
-        x = x + self.mlp(self.ln_mlp(x))
-        return x
+        """Apply attention + MLP with residual connections."""
+
+        # Pre-norm architecture: normalise before each sub-layer so gradients
+        # flow reliably even in deep networks.
+        attn_input = self.ln_attn(hidden_states)
+        attn_output = self.attn(attn_input, attn_mask=attn_mask, position_ids=position_ids)
+        hidden_states = hidden_states + attn_output
+
+        mlp_input = self.ln_mlp(hidden_states)
+        mlp_output = self.mlp(mlp_input)
+        return hidden_states + mlp_output
