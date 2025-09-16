@@ -202,7 +202,7 @@ def main():
     # ===== Your layer 0 (use the same eager attention path) =====
     positions = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
     x_my = mine.tok_emb(input_ids)
-    in0_my = mine.drop(x_my)
+    in0_my = x_my  # Remove drop reference since SmolLM doesn't have this attribute
     ln1_my = mine.blocks[0].ln_attn(in0_my)
 
     h  = mine.cfg.n_head
