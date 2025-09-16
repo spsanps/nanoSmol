@@ -147,7 +147,9 @@ class SmolLM2(nn.Module):
             if value is None:
                 missing.append(target_name)
                 return
-            target = params.get(target_name) or buffers.get(target_name)
+            target = params.get(target_name)
+            if target is None:
+                target = buffers.get(target_name)
             if target is None:
                 missing.append(target_name)
                 return
