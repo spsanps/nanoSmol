@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Dump the *original* SmolLM2 (HF) checkpoint schema so you can map it into
-models/smolLM2.py. Inspired by nanoGPT's simple tooling.
+the ``models/smolLM2/`` package. Inspired by nanoGPT's simple tooling.
 
 What it does:
  - Loads a SmolLM2 (or any GPT-style) HF checkpoint from Hub or local path
@@ -10,7 +10,7 @@ What it does:
    * state_schema.json   — {parameter_name: shape}
    * state_shapes.tsv    — tabular view (name\tshape\tnumel)
    * module_tree.txt     — nested module tree with parameter counts
-   * keymap_template.yaml— suggested key-name mapping to models/smolLM2.py
+   * keymap_template.yaml— suggested key-name mapping to models/smolLM2/
 
 Usage
 -----
@@ -124,13 +124,13 @@ def detect_smol_style_keys(state: Dict[str, torch.Tensor]) -> Dict[str, bool]:
 
 
 def make_keymap_template(out_dir: Path, state: Dict[str, torch.Tensor]) -> None:
-    """Emit a YAML-ish template mapping HF keys -> your models/smolLM2.py keys.
+    """Emit a YAML-ish template mapping HF keys -> your models/smolLM2 package keys.
     This is a *suggestion*; adjust to your checkpoint.
     """
     hints = detect_smol_style_keys(state)
-    gate_note = "(concat gate_proj & up_proj along dim=-1 to models/MLP.w1)" if hints["has_gate_proj"] else "(use up_proj -> mlp.w1)"
+    gate_note = "(concat gate_proj & up_proj along dim=-1 to models/MLP.in_proj)" if hints["has_gate_proj"] else "(use up_proj -> mlp.in_proj)"
     lines = [
-        "# keymap_template.yaml — edit and use for manual remap in models/smolLM2.py",
+        "# keymap_template.yaml — edit and use for manual remap in models/smolLM2/",
         "# Left side: HF checkpoint key, Right side: your module key",
         "",
         "# Embeddings / final norm / head",
@@ -140,17 +140,17 @@ def make_keymap_template(out_dir: Path, state: Dict[str, torch.Tensor]) -> None:
         "",
         "# Per-layer mapping (layer index i)",
         "# input LN",
-        "model.layers.{i}.input_layernorm.weight: blocks.{i}.ln1.weight",
+        "model.layers.{i}.input_layernorm.weight: blocks.{i}.ln_attn.weight",
         "# attention projections",
         "model.layers.{i}.self_attn.q_proj.weight: blocks.{i}.attn.q_proj.weight",
         "model.layers.{i}.self_attn.k_proj.weight: blocks.{i}.attn.k_proj.weight",
         "model.layers.{i}.self_attn.v_proj.weight: blocks.{i}.attn.v_proj.weight",
         "model.layers.{i}.self_attn.o_proj.weight: blocks.{i}.attn.o_proj.weight",
         "# post-attn LN",
-        "model.layers.{i}.post_attention_layernorm.weight: blocks.{i}.ln2.weight",
+        "model.layers.{i}.post_attention_layernorm.weight: blocks.{i}.ln_mlp.weight",
         "# MLP (SwiGLU) {gate_note}",
-        "model.layers.{i}.mlp.gate_proj.weight + model.layers.{i}.mlp.up_proj.weight -> blocks.{i}.mlp.w1.weight",
-        "model.layers.{i}.mlp.down_proj.weight: blocks.{i}.mlp.w2.weight",
+        "model.layers.{i}.mlp.gate_proj.weight + model.layers.{i}.mlp.up_proj.weight -> blocks.{i}.mlp.in_proj.weight",
+        "model.layers.{i}.mlp.down_proj.weight: blocks.{i}.mlp.out_proj.weight",
         "",
         "# If your checkpoint has biases, map *.bias similarly.",
     ]
