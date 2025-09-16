@@ -209,40 +209,81 @@ def main():
     hk = mine.cfg.n_kv_head
     hd = mine.cfg.head_dim()
 
-    q = mine.blocks[0].attn.q_proj(ln1_my).view(B, T, h, hd).permute(0, 2, 1, 3)   # [B,h,T,hd]
-    k = mine.blocks[0].attn.k_proj(ln1_my).view(B, T, hk, hd).permute(0, 2, 1, 3)
-    v = mine.blocks[0].attn.v_proj(ln1_my).view(B, T, hk, hd).permute(0, 2, 1, 3)
-    # RoPE (your module expects [B,T,H,hd], so permute back temporarily)
-    q_r, k_r = mine.blocks[0].attn.rotary(q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), positions=positions)
-    q_r, k_r = q_r.permute(0,2,1,3), k_r.permute(0,2,1,3)
-    if hk != h:
-        rep = h // hk
-        k_r = repeat_kv(k_r, rep)
-        v   = repeat_kv(v,   rep)
+    # -------- Staged comparisons with proper shapes --------
+    def report(name, a, b):
+        print(f"{name:<20} max|Δ|={maxdiff(a,b):.6g}")
 
+    print("stage diffs (max abs):")
+    report("LN1", ln1_my, ln1_hf)
+
+    # ----- Stage A: pre-RoPE, pre-permute -----
+    q_my_A = mine.blocks[0].attn.q_proj(ln1_my).view(B, T, h,  hd)   # [B,T,h,hd]
+    k_my_A = mine.blocks[0].attn.k_proj(ln1_my).view(B, T, hk, hd)   # [B,T,hk,hd]
+    v_my_A = mine.blocks[0].attn.v_proj(ln1_my).view(B, T, hk, hd)   # [B,T,hk,hd]
+    
+    # Get fresh HF projections (before any RoPE/permute operations)
+    q_hf_A = l0.self_attn.q_proj(ln1_hf).view(B, T, H, hd)   # [B,T,H,hd]
+    k_hf_A = l0.self_attn.k_proj(ln1_hf).view(B, T, HK, hd)  # [B,T,HK,hd]
+    v_hf_A = l0.self_attn.v_proj(ln1_hf).view(B, T, HK, hd)  # [B,T,HK,hd]
+
+    # Only compare if dimensions match (h==H and hk==HK)
+    if h == H and hk == HK:
+        report("Q pre-RoPE", q_my_A, q_hf_A)
+        report("K pre-RoPE", k_my_A, k_hf_A)
+        report("V pre-RoPE", v_my_A, v_hf_A)
+    else:
+        print(f"Skipping Stage A comparison: head count mismatch (mine: h={h}, hk={hk} vs HF: H={H}, HK={HK})")
+
+    # ----- Stage B: post-RoPE, pre-repeat -----
+    q_my_B, k_my_B = mine.blocks[0].attn.rotary(q_my_A, k_my_A, positions=positions)   # [B,T,h,hd], [B,T,hk,hd]
+
+    # Apply RoPE to fresh HF projections
+    q_hf_A_permuted = q_hf_A.permute(0,2,1,3)  # [B,H,T,hd] for apply_rope
+    k_hf_A_permuted = k_hf_A.permute(0,2,1,3)  # [B,HK,T,hd] for apply_rope
+    q_hf_B_permuted, k_hf_B_permuted = apply_rope(q_hf_A_permuted, k_hf_A_permuted, cos, sin)
+    q_hf_B = q_hf_B_permuted.permute(0,2,1,3)  # back to [B,T,H,hd]
+    k_hf_B = k_hf_B_permuted.permute(0,2,1,3)  # back to [B,T,HK,hd]
+
+    # Only compare if dimensions match
+    if h == H and hk == HK:
+        report("Q post-RoPE", q_my_B, q_hf_B)
+        report("K post-RoPE", k_my_B, k_hf_B)
+    else:
+        print(f"Skipping Stage B comparison: head count mismatch (mine: h={h}, hk={hk} vs HF: H={H}, HK={HK})")
+
+    # ----- Stage C: post-RoPE, post-repeat (GQA expanded to H heads) -----
+    def repeat_kv_for_compare(x, rep):  # x: [B,T,HK,hd] -> [B,T,H,hd]
+        if rep == 1: return x
+        return x.repeat_interleave(rep, dim=2)
+
+    rep_my = h // hk
+    rep_hf = H // HK
+    k_my_C  = repeat_kv_for_compare(k_my_B, rep_my).permute(0,2,1,3)  # [B,H,T,hd]
+    v_my_C  = repeat_kv_for_compare(v_my_A, rep_my).permute(0,2,1,3)  # [B,H,T,hd]
+    k_hf_C  = repeat_kv_for_compare(k_hf_B, rep_hf).permute(0,2,1,3)  # [B,H,T,hd]
+    v_hf_C  = repeat_kv_for_compare(v_hf_A, rep_hf).permute(0,2,1,3)  # [B,H,T,hd]
+    q_my_C  = q_my_B.permute(0,2,1,3)                     # [B,H,T,hd]
+    q_hf_C  = q_hf_B.permute(0,2,1,3)                     # [B,H,T,hd]
+
+    # All tensors should now be [B,H,T,hd] format
+    report("Q post-repeat", q_my_C, q_hf_C)
+    report("K post-repeat", k_my_C, k_hf_C)
+    report("V post-repeat", v_my_C, v_hf_C)
+
+    # Continue with attention computation using the properly shaped tensors
     # same eager attention in fp32
-    scores_my = (q_r.float() @ k_r.float().transpose(2,3)) * (hd ** -0.5)
+    scores_my = (q_my_C.float() @ k_my_C.float().transpose(2,3)) * (hd ** -0.5)
     scores_my = scores_my + add_mask
-    aw_my = F.softmax(scores_my, dim=-1, dtype=torch.float32).to(q.dtype)
-    attn_out_my = aw_my @ v.float()
-    attn_out_my = attn_out_my.to(q.dtype).transpose(1,2).contiguous().view(B, T, h*hd)
+    aw_my = F.softmax(scores_my, dim=-1, dtype=torch.float32).to(q_my_C.dtype)
+    attn_out_my = aw_my @ v_my_C.float()
+    attn_out_my = attn_out_my.to(q_my_C.dtype).transpose(1,2).contiguous().view(B, T, h*hd)
     oproj_my = mine.blocks[0].attn.o_proj(attn_out_my)
     resid1_my = in0_my + mine.blocks[0].attn.resid_dropout(oproj_my)
     ln2_my = mine.blocks[0].ln_mlp(resid1_my)
     mlp_my = mine.blocks[0].mlp(ln2_my)
     out_my = resid1_my + mlp_my
 
-    # -------- diffs --------
-    def report(name, a, b):
-        print(f"{name:<12} max|Δ|={maxdiff(a,b):.6g}")
-
-    print("stage diffs (max abs):")
-    report("LN1", ln1_my, ln1_hf)
-    report("Q (all)", q.permute(0,2,1,3), q_hf.permute(0,2,1,3))
-    report("K (all)", k.permute(0,2,1,3), k_hf.permute(0,2,1,3)[:, :, :hk, :])
-    report("V (all)", v.permute(0,2,1,3)[:, :, :hk, :], v_hf.permute(0,2,1,3)[:, :, :hk, :])
-    report("Q_rope", q_r.permute(0,2,1,3), q_hf.permute(0,2,1,3))
-    report("K_rope", k_r.permute(0,2,1,3)[:, :, :hk, :], k_hf.permute(0,2,1,3)[:, :, :hk, :])
+    # Final stage comparisons
     report("AttnOut", attn_out_my, attn_out_hf)
     report("O_proj", oproj_my, oproj_hf)
     report("Resid1", resid1_my, resid1_hf)
