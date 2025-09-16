@@ -145,9 +145,21 @@ def main():
         torch_dtype=dtype,
         device_map={"": device.type},
     ).eval()
-
+    
     # Import into local
     local_model.load_hf_state_dict(hf_model.state_dict(), strict=False, verbose=True, dtype=dtype, device=device)
+
+    with torch.no_grad():
+        max_diff = (local_model.lm_head.weight - local_model.tok_emb.weight).abs().max().item()
+    print(f"lm_head vs tok_emb max |diff| = {max_diff:.6g}")
+    assert (max_diff < 1e-6), "lm_head and tok_emb should be tied!"
+    
+    # check difference between local and hf lm_head weights
+    with torch.no_grad():
+        max_diff = (local_model.lm_head.weight - hf_model.lm_head.weight.to(device=device, dtype=dtype)).abs().max().item()
+    print(f"local vs hf lm_head max |diff| = {max_diff:.6g}")
+    assert (max_diff < 1e-3), "lm_head weights differ too much!"
+
 
     # Compare step-by-step (teacher forcing)
     ids = input_ids.clone()

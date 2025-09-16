@@ -84,53 +84,43 @@ class RMSNorm(nn.Module):
 
 class RotaryEmbedding(nn.Module):
     """
-    HF-compatible RoPE for LLaMA-style models.
-    Applies rotation to the first rope_dim of q,k.
+    HF/Llama-style RoPE. Full-dim (rope_dim=head_dim) like SmolLM2.
+    positions: [B, T] (arange(T) in prefill)
+    q,k: [B, T, H, hd]
     """
-    def __init__(self, head_dim: int, max_seq_len: int, base: float = 10000.0, rope_dim: Optional[int] = None):
+    def __init__(self, head_dim: int, max_seq_len: int, base: float = 10000.0):
         super().__init__()
-        self.head_dim = head_dim
-        self.rope_dim = rope_dim if rope_dim is not None else head_dim
-        inv_freq = 1.0 / (base ** (torch.arange(0, self.rope_dim, 2).float() / self.rope_dim))
+        self.hd = head_dim
+        # frequencies for half-dim
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    def _cos_sin(self, seqlen: int, device, dtype):
-        t = torch.arange(seqlen, device=device, dtype=torch.float32)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)  # [T, rope_dim/2]
-        cos = freqs.cos().to(dtype)
-        sin = freqs.sin().to(dtype)
-        return cos, sin  # [T, D/2]
-
     @staticmethod
-    def _rotate_half(x):  # x[..., D]
-        x_even = x[..., ::2]
-        x_odd  = x[..., 1::2]
-        return torch.stack((-x_odd, x_even), dim=-1).flatten(-2)  # [-x1, x0] interleave
+    def rotate_half(x):  # x: [..., hd]
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
 
-    def _apply_one(self, x, cos, sin, pos_ids=None):
-        x_rope, x_pass = x[..., :self.rope_dim], x[..., self.rope_dim:]
-        if pos_ids is not None:
-            cos = F.embedding(pos_ids, cos)  # [B,T,D/2]
-            sin = F.embedding(pos_ids, sin)
-        # broadcast to [B,T,1,D/2]
-        cos = cos.unsqueeze(2)
-        sin = sin.unsqueeze(2)
-        # interleave back to D by duplicating cos/sin across pairs
-        x_cos = torch.empty_like(x_rope)
-        x_cos[..., ::2] = cos
-        x_cos[..., 1::2] = cos
-        x_sin = torch.empty_like(x_rope)
-        x_sin[..., ::2] = sin
-        x_sin[..., 1::2] = sin
-        x_applied = (x_rope * x_cos) + (self._rotate_half(x_rope) * x_sin)
-        return torch.cat([x_applied, x_pass], dim=-1)
+    def _cos_sin(self, positions: torch.Tensor, device, dtype):
+        # positions: [B, T]
+        # freqs: [B, T, hd/2]
+        freqs = torch.einsum("bt,d->btd", positions.to(torch.float32), self.inv_freq.to(device=device))
+        # emb: [B, T, hd] by duplicating along last dim
+        emb = torch.cat([freqs, freqs], dim=-1)
+        # compute in fp32 like HF
+        cos = emb.cos()
+        sin = emb.sin()
+        return cos.to(dtype=dtype), sin.to(dtype=dtype)  # [B, T, hd]
 
-    def forward(self, q, k, positions: Optional[torch.Tensor] = None):
+    def forward(self, q, k, positions: torch.Tensor):
         # q,k: [B, T, H, hd]
-        T = q.size(1)
-        cos, sin = self._cos_sin(T, q.device, q.dtype)  # [T, D/2]
-        q = self._apply_one(q, cos, sin, positions)
-        k = self._apply_one(k, cos, sin, positions)
+        B, T, H, hd = q.shape
+        cos, sin = self._cos_sin(positions, q.device, q.dtype)  # [B,T,hd]
+        # broadcast to heads
+        cos = cos.unsqueeze(2)  # [B,T,1,hd]
+        sin = sin.unsqueeze(2)
+        q = (q * cos) + (self.rotate_half(q) * sin)
+        k = (k * cos) + (self.rotate_half(k) * sin)
         return q, k
 
 
@@ -170,7 +160,8 @@ class MultiheadAttention(nn.Module):
         self.o_proj = nn.Linear(h * hd, d, bias=cfg.out_proj_bias)
         self.attn_dropout = nn.Dropout(cfg.dropout)
         self.resid_dropout = nn.Dropout(cfg.dropout)
-        self.rope = RotaryEmbedding(hd, cfg.max_seq_len, base=cfg.rope_base, rope_dim=cfg.rope_dim())
+        self.rope = RotaryEmbedding(cfg.head_dim(), cfg.max_seq_len, base=cfg.rope_base)
+
 
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, positions: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, D = x.shape
@@ -240,16 +231,25 @@ class SmolLM(nn.Module):
         returns: logits [B, T, vocab]
         """
         B, T = input_ids.shape
-        if positions is None:
-            positions = torch.arange(T, device=input_ids.device).unsqueeze(0).expand(B, T)
+
+        if attention_mask is not None:
+            # SDPA wants True where positions should be MASKED OUT
+            # Start from HF convention: 1=keep, 0=pad
+            pad_mask = ~attention_mask.bool()              # [B, T], True at pads
+            attn_mask = pad_mask[:, None, None, :]         # [B, 1, 1, T_k]
+            # LLaMA-style position_ids that skip pads (left- or right-padding)
+            positions = (attention_mask.long().cumsum(-1) - 1).clamp_min(0)
+        else:
+            attn_mask = None
+            if positions is None:
+                positions = torch.arange(T, device=input_ids.device).unsqueeze(0).expand(B, T)
 
         x = self.tok_emb(input_ids)
         x = self.drop(x)
         for blk in self.blocks:
-            x = blk(x, attn_mask=attention_mask, positions=positions)
+            x = blk(x, attn_mask=attn_mask, positions=positions)
         x = self.ln_f(x)
-        logits = self.lm_head(x)
-        return logits
+        return self.lm_head(x)
 
     # ---- Utils ----
     def _init_weights(self, module: nn.Module):
