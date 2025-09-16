@@ -41,21 +41,15 @@ def map_hf_config_to_smol(cfg_hf) -> SmolConfig:
     return SmolConfig(
         vocab_size=vocab_size,
         d_model=d_model,
-        n_layer=n_layer,
-        n_head=n_head,
-        n_kv_head=n_kv_head,
+        n_layers=n_layer,
+        n_heads=n_head,
+        n_kv_heads=n_kv_head,
         d_ff=d_ff,
         max_seq_len=max_seq_len,
-        rope_base=rope_base,
-        rope_pct=1.0,
+        rope_theta=rope_base,
         dropout=0.0,
         norm_eps=norm_eps,
-        tie_embeddings=tie_word_embeddings,  # important for safe loading
-        qkv_proj_bias=False,
-        out_proj_bias=False,
-        mlp_activation="silu",
-        gated_mlp=True,
-        mlp_bias=False,
+        tie_embeddings=tie_word_embeddings,
         init_std=0.02,
         pad_token_id=pad_id,
     )
@@ -80,9 +74,9 @@ def run_minimal_collect_layers(model: SmolLM, input_ids: torch.Tensor, attention
     x = model.drop(x)
     outs = []
     for blk in model.blocks:
-        x = blk(x, attn_mask=attn_mask, positions=positions)
+        x = blk(x, attn_mask=attn_mask, position_ids=positions)
         outs.append(x.clone())
-    x = model.ln_f(x)
+    x = model.norm_out(x)
     return outs, x  # per-layer outputs, and final normalized last_hidden_state
 
 @torch.no_grad()
