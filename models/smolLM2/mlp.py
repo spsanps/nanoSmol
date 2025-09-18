@@ -11,8 +11,13 @@ from .config import SmolLM2Config
 class SmolLM2MLP(nn.Module):
     """SwiGLU MLP used in SmolLM2.
 
-    Hugging Face's implementation splits the gate and up projections.  We keep
-    that layout but pack them into a single linear layer for simplicity.
+    The feed-forward network implements the following transformation for each
+    token independently:
+
+    ``SwiGLU(x) = (W_g x) * silu(W_f x)`` where the multiplication is elementwise.
+    The combined projection in ``self.in_proj`` stores the
+    ``W_g`` (gate) and ``W_f`` (feature) weights back-to-back so we can split
+    them with a single ``chunk`` operation.
     """
 
     def __init__(self, cfg: SmolLM2Config) -> None:
@@ -23,11 +28,18 @@ class SmolLM2MLP(nn.Module):
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Run the SwiGLU feed-forward network used in SmolLM2."""
+        """Run the SwiGLU feed-forward network used in SmolLM2.
 
-        gate_values, candidate_values = self.in_proj(hidden_states).chunk(2, dim=-1)
-        # SwiGLU activation: silu(gate) provides a smooth gating curve that is
-        # multiplied with the candidate branch to introduce elementwise sparsity.
-        activated = F.silu(gate_values) * candidate_values
-        activated = self.out_proj(activated)
-        return self.dropout(activated)
+        Args:
+            hidden_states: ``(batch, seq_len, hidden_size)`` tensor.
+        Returns:
+            Tensor with the same shape containing the per-token MLP update.
+        """
+
+        gate_pre_activation, feature_values = self.in_proj(hidden_states).chunk(2, dim=-1)
+        # SwiGLU activation: silu(gate) = gate * sigmoid(gate).  Multiplying this
+        # smooth gate with the candidate features allows the model to learn a
+        # data-dependent sparsity pattern.
+        gated_features = F.silu(gate_pre_activation) * feature_values
+        projected_update = self.out_proj(gated_features)
+        return self.dropout(projected_update)

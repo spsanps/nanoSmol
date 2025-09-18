@@ -12,7 +12,20 @@ from .rotary import RotaryPositionalEmbedding
 
 
 class SmolVLMSelfAttention(nn.Module):
-    """Grouped-query causal self-attention."""
+    """Grouped-query causal self-attention layer.
+
+    The implementation mirrors the textbook transformer equations so beginners
+    can connect the code to the math:
+
+    * Query/key/value projections implement ``Q = XW_Q`` (and friends) where
+      ``X`` is the incoming hidden state matrix.
+    * Rotary position embeddings rotate the cosine and sine halves of each head
+      vector so the dot-product encodes relative position.
+    * When ``num_attention_heads`` is a multiple of ``num_key_value_heads`` we
+      duplicate key/value heads to emulate grouped-query attention.
+    * ``scaled_dot_product_attention`` performs ``softmax(QK^T / sqrt(d))V`` in
+      a fused, numerically stable kernel.
+    """
 
     def __init__(self, cfg: SmolVLMLanguageConfig) -> None:
         super().__init__()
