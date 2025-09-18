@@ -10,20 +10,22 @@ import torch.nn as nn
 class RotaryPositionalEmbedding(nn.Module):
     """Lightweight rotary embedding helper.
 
-    Rotary embeddings encode positions as rotations applied directly to the
-    query/key vectors.  The module below pre-computes inverse frequencies and
-    exposes a ``forward`` method that takes query/key tensors plus the integer
-    positions to rotate by.  Keeping this logic in one place avoids cluttering
-    the attention block with trigonometric boilerplate.
+    The head dimension is conceptually split into two contiguous halves that
+    store the cosine and sine channels of the embedding.  Rotating those halves
+    by an angle derived from the token position injects relative offsets into
+    the attention scores while leaving the vector norm unchanged.  Packaging the
+    trigonometric work in this module keeps the attention block focused on the
+    linear algebra.
     """
 
     def __init__(self, head_dim: int, max_position_embeddings: int, base: float) -> None:
         super().__init__()
         self.head_dim = head_dim
         self.max_position_embeddings = max_position_embeddings
-        # Inverse frequencies follow the LLaMA recipe: even dimensions share the
-        # same frequency, odd dimensions reuse those values.  ``persistent=False``
-        # avoids storing the buffer inside checkpoints unnecessarily.
+        # Inverse frequencies follow the LLaMA recipe: we sample every other
+        # feature to produce half as many frequencies and reuse them for both
+        # halves of the head vector.  ``persistent=False`` avoids storing the
+        # buffer inside checkpoints unnecessarily.
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -41,7 +43,8 @@ class RotaryPositionalEmbedding(nn.Module):
         # ``positions`` is integer valued with shape [batch, seq_len].  We cast to
         # float so ``einsum`` can multiply by the inverse frequencies.  The result
         # is a grid of angles; concatenating the tensor with itself aligns the
-        # values with the full head dimension (even + odd indices).
+        # values with the cosine half followed by the sine half of the head
+        # dimension.
         angles = torch.einsum("bt,d->btd", positions.to(torch.float32), self.inv_freq.to(device))
         angles = torch.cat([angles, angles], dim=-1)
         return angles.cos().to(dtype=dtype), angles.sin().to(dtype=dtype)

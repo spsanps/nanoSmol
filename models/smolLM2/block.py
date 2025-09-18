@@ -1,4 +1,15 @@
-"""Transformer block (attention + MLP) for SmolLM2."""
+"""Transformer block (attention + MLP) for SmolLM2.
+
+Each block follows the "pre-norm" layout popularised by GPT-style models:
+
+1. Normalise the residual stream so gradients stay well behaved.
+2. Apply multi-head attention and add the result back to the residual stream.
+3. Repeat the normalise/transform/add pattern with the SwiGLU feed-forward
+   network.
+
+This mirrors the standard transformer equations and gives readers a clear map
+between the math and the code.
+"""
 from __future__ import annotations
 
 from typing import Optional
@@ -29,14 +40,29 @@ class SmolLM2Block(nn.Module):
         attn_mask: Optional[torch.Tensor],
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """Apply attention + MLP with residual connections."""
+        """Apply the attention and MLP sub-layers with residual connections.
 
-        # Pre-norm architecture: normalise before each sub-layer so gradients
-        # flow reliably even in deep networks.
-        attn_input = self.ln_attn(hidden_states)
-        attn_output = self.attn(attn_input, attn_mask=attn_mask, position_ids=position_ids)
-        hidden_states = hidden_states + attn_output
+        Args:
+            hidden_states: ``(batch, seq_len, hidden_size)`` residual stream.
+            attn_mask: Optional attention mask broadcastable to
+                ``(batch, num_heads, query_len, key_len)``.
+            position_ids: Rotary position indices passed straight to attention.
+        """
 
-        mlp_input = self.ln_mlp(hidden_states)
-        mlp_output = self.mlp(mlp_input)
-        return hidden_states + mlp_output
+        # --- Attention sub-layer -------------------------------------------------
+        # Pre-norm: stabilise the statistics of the residual stream before the
+        # attention projections so that scaling is consistent across layers.
+        normalized_for_attention = self.ln_attn(hidden_states)
+        attention_update = self.attn(
+            normalized_for_attention,
+            attn_mask=attn_mask,
+            position_ids=position_ids,
+        )
+        hidden_states = hidden_states + attention_update
+
+        # --- Feed-forward sub-layer ----------------------------------------------
+        # Another pre-norm step followed by the SwiGLU MLP.  The output is added
+        # back to the residual stream, completing the transformer block update.
+        normalized_for_mlp = self.ln_mlp(hidden_states)
+        mlp_update = self.mlp(normalized_for_mlp)
+        return hidden_states + mlp_update

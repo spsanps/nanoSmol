@@ -1,4 +1,17 @@
-"""Top-level language model composed of the SmolLM2 decoder blocks."""
+"""Top-level language model composed of the SmolLM2 decoder blocks.
+
+The class follows the standard decoder-only transformer pipeline:
+
+1. Token indices ``input_ids`` are mapped to dense vectors by the embedding
+   table.  This produces the *residual stream* that flows through the model.
+2. A stack of :class:`SmolLM2Block` modules iteratively refines that stream via
+   attention and SwiGLU feed-forward layers.
+3. A final RMSNorm ensures the statistics are well-scaled before projecting the
+   activations back to vocabulary logits via ``lm_head``.
+
+Every step is annotated with tensor shapes so that beginners can trace the data
+flow without needing to mentally execute the code.
+"""
 from __future__ import annotations
 
 import re
@@ -19,39 +32,55 @@ class SmolLM2(nn.Module):
     def __init__(self, cfg: SmolLM2Config) -> None:
         super().__init__()
         self.cfg = cfg
-        # Token embedding layer converts token indices into dense vectors.
+        # Token embedding layer converts token indices into dense vectors of
+        # shape [batch, seq_len, d_model].  The name ``tok_emb`` is kept for
+        # backwards compatibility with older checkpoints.
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        # Dropout is applied immediately after embedding to regularise training
+        # without interfering with the residual connections later on.
         self.dropout = nn.Dropout(cfg.dropout)
+        # The transformer stack: each block consumes and produces a residual
+        # stream with the same shape.
         self.blocks = nn.ModuleList([SmolLM2Block(cfg) for _ in range(cfg.n_layers)])
+        # Final normalisation keeps the output distribution stable across layers.
         self.norm_out = RMSNorm(cfg.d_model, eps=cfg.norm_eps)
+        # Linear layer projecting the residual stream to vocabulary logits.
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
         if cfg.tie_embeddings:
             self._tie_lm_head_to_embedding()
 
-        # Populate parameters with the standard Gaussian initialisation.
+        # Populate parameters with the standard Gaussian initialisation used by
+        # many transformer implementations.  Biases stay at zero.
         self.apply(self._init_weights)
 
     # ------------------------------------------------------------------ utils
     def _tie_lm_head_to_embedding(self) -> None:
+        """Share weights between the embedding table and the output projection."""
         # Share storage so any update to the embedding weights is reflected in
         # the output projection.  This mimics Hugging Face's tie-weights logic.
         self.lm_head.weight = self.tok_emb.weight
 
     def _init_weights(self, module: nn.Module) -> None:
+        """Initialise linear/embedding weights with ``N(0, init_std^2)``."""
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=self.cfg.init_std)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.cfg.init_std)
 
     def num_parameters(self, trainable_only: bool = False) -> int:
-        """Return the number of parameters, optionally excluding frozen ones."""
+        """Return the number of parameters, optionally excluding frozen ones.
+
+        Setting ``trainable_only=True`` counts just the tensors where
+        ``requires_grad`` is ``True``—handy when freezing parts of the model.
+        """
 
         params = self.parameters() if not trainable_only else (p for p in self.parameters() if p.requires_grad)
         return sum(p.numel() for p in params)
 
     @staticmethod
     def from_config_dict(cfg_dict: Dict) -> "SmolLM2":
+        """Instantiate :class:`SmolLM2` directly from a plain dictionary."""
         return SmolLM2(SmolLM2Config(**cfg_dict))
 
     # ---------------------------------------------------------------- forward
@@ -64,7 +93,14 @@ class SmolLM2(nn.Module):
         seq_len: int,
         device: torch.device,
     ) -> tuple[Optional[torch.Tensor], torch.Tensor]:
-        """Build the masks/position ids expected by the attention modules."""
+        """Build the masks/position ids expected by the attention modules.
+
+        Hugging Face style models accept masks where ``1`` indicates a valid
+        (non-padding) token.  The PyTorch attention kernel expects ``True`` to
+        *mask out* positions instead, so we flip the bits and expand the tensor
+        to ``(batch, 1, 1, key_len)`` for broadcasting.  Position ids default to
+        ``[0, 1, ..., seq_len-1]`` unless provided explicitly.
+        """
 
         if attention_mask is not None:
             # ``attention_mask`` follows the Hugging Face convention where
@@ -88,7 +124,17 @@ class SmolLM2(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Compute logits over the vocabulary for the provided token ids."""
+        """Compute logits over the vocabulary for the provided token ids.
+
+        Args:
+            input_ids: ``(batch, seq_len)`` integer tensor with token indices.
+            attention_mask: Optional mask following the Hugging Face convention
+                where ``1`` marks a valid token and ``0`` marks padding.
+            position_ids: Optional ``(batch, seq_len)`` tensor overriding the
+                default monotonic positions.
+        Returns:
+            ``(batch, seq_len, vocab_size)`` tensor of logits.
+        """
 
         batch_size, seq_len = input_ids.shape
         attn_mask, position_ids = self._prepare_attention_inputs(
@@ -99,12 +145,22 @@ class SmolLM2(nn.Module):
             device=input_ids.device,
         )
 
-        hidden_states = self.tok_emb(input_ids)
-        hidden_states = self.dropout(hidden_states)
+        # --- Embedding -----------------------------------------------------------
+        residual_stream = self.tok_emb(input_ids)
+        residual_stream = self.dropout(residual_stream)
+
+        # --- Transformer stack ---------------------------------------------------
         for block in self.blocks:
-            hidden_states = block(hidden_states, attn_mask=attn_mask, position_ids=position_ids)
-        hidden_states = self.norm_out(hidden_states)
-        return self.lm_head(hidden_states)
+            residual_stream = block(
+                residual_stream,
+                attn_mask=attn_mask,
+                position_ids=position_ids,
+            )
+
+        # --- Output head ---------------------------------------------------------
+        residual_stream = self.norm_out(residual_stream)
+        logits = self.lm_head(residual_stream)
+        return logits
 
     # ---------------------------------------------------------------- sampling
     @torch.no_grad()
@@ -116,22 +172,30 @@ class SmolLM2(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
     ) -> torch.Tensor:
-        """Autoregressively sample tokens from the model."""
+        """Autoregressively sample tokens from the model.
+
+        The routine repeatedly feeds the growing sequence back into the model,
+        extracts the logits for the most recent position, and samples the next
+        token according to a temperature-scaled distribution (optionally
+        truncated to the top ``k`` candidates).
+        """
 
         # Switch to inference mode (disables dropout) while sampling.
         self.eval()
         for _ in range(max_new_tokens):
-            logits = self(input_ids)[:, -1, :]
-            logits = logits / max(temperature, 1e-6)
+            # Forward pass returns [batch, current_len, vocab]; select the newest
+            # position so we can decide which token comes next.
+            next_token_logits = self(input_ids)[:, -1, :]
+            next_token_logits = next_token_logits / max(temperature, 1e-6)
             if top_k is not None:
-                topk_values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                topk_values, _ = torch.topk(next_token_logits, min(top_k, next_token_logits.size(-1)))
                 threshold = topk_values[:, [-1]]
                 # Filter logits so only the ``top_k`` candidates remain viable.
-                logits = logits.masked_fill(logits < threshold, -float("inf"))
-            probs = F.softmax(logits, dim=-1)
+                next_token_logits = next_token_logits.masked_fill(next_token_logits < threshold, -float("inf"))
+            next_token_probs = F.softmax(next_token_logits, dim=-1)
             # Sample the next token id according to the probability distribution.
-            next_id = torch.multinomial(probs, num_samples=1)
-            input_ids = torch.cat([input_ids, next_id], dim=1)
+            next_token_id = torch.multinomial(next_token_probs, num_samples=1)
+            input_ids = torch.cat([input_ids, next_token_id], dim=1)
         return input_ids
 
     # ---------------------------------------------------------------- loading
@@ -144,7 +208,12 @@ class SmolLM2(nn.Module):
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
     ) -> None:
-        """Load tensors from a Hugging Face SmolLM2 checkpoint."""
+        """Load tensors from a Hugging Face SmolLM2 checkpoint.
+
+        The published checkpoints use the LLaMA-style naming convention.  This
+        helper maps each Hugging Face key onto our module names and validates
+        tensor shapes before copying the data into place.
+        """
 
         ref_param = next(self.parameters(), None)
         if dtype is None:
@@ -160,6 +229,7 @@ class SmolLM2(nn.Module):
         buffers = dict(self.named_buffers())
 
         def fetch(key: str, *, mark_only: bool = False) -> Optional[torch.Tensor]:
+            """Retrieve a tensor from ``hf_state`` and move it to the target device."""
             if key not in hf_state:
                 return None
             used_keys.add(key)
@@ -169,6 +239,7 @@ class SmolLM2(nn.Module):
             return tensor.to(device=device, dtype=dtype)
 
         def assign(target_name: str, value: Optional[torch.Tensor]) -> None:
+            """Copy ``value`` into the parameter/buffer named ``target_name``."""
             if value is None:
                 missing.append(target_name)
                 return
@@ -244,7 +315,12 @@ def _cat_or_fetch(
     up: Optional[torch.Tensor],
     combined: Optional[torch.Tensor],
 ) -> Optional[torch.Tensor]:
-    """Return gate+up tensors if available, otherwise use the combined weight."""
+    """Return gate+up tensors if available, otherwise use the combined weight.
+
+    Hugging Face exposes either separate ``gate``/``up`` projections or a single
+    packed matrix (historical checkpoints).  We prefer the separated form but
+    fall back to the combined tensor when needed.
+    """
 
     if gate is not None and up is not None:
         return torch.cat([gate, up], dim=0)
