@@ -78,11 +78,28 @@ class SmolVLMSelfAttention(nn.Module):
         key = key.permute(0, 2, 1, 3)
         value = value.permute(0, 2, 1, 3)
 
+        attn_mask = attention_mask
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                # ``scaled_dot_product_attention`` treats boolean masks
+                # differently from the additive masks produced by Hugging
+                # Face.  Converting to large negative biases matches the
+                # reference implementation and avoids numerical drift even
+                # when no padding positions are masked.
+                if not attn_mask.any():
+                    attn_mask = None
+                else:
+                    mask_val = torch.finfo(query.dtype).min
+                    attn_mask = attn_mask.to(dtype=query.dtype)
+                    attn_mask = attn_mask.masked_fill(attention_mask, mask_val)
+            else:
+                attn_mask = attn_mask.to(dtype=query.dtype)
+
         attn_output = F.scaled_dot_product_attention(
             query,
             key,
             value,
-            attn_mask=attention_mask,
+            attn_mask=attn_mask,
             dropout_p=self.attention_dropout.p if self.training else 0.0,
             is_causal=True,
         )
