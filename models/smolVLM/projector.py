@@ -26,6 +26,9 @@ class SmolVLMMultiModalProjector(nn.Module):
         if image_hidden_states.numel() == 0:
             return image_hidden_states.new_zeros((0, 0, self.out_features))
 
+        # ``pixel_shuffle`` rearranges the patch grid so each language token can
+        # attend to a slightly larger receptive field.  It is effectively the
+        # inverse of the pixel-unshuffle operation used in many vision models.
         shuffled = self.pixel_shuffle(image_hidden_states, self.scale_factor)
         if self.hidden_dim is None:
             return self.proj(shuffled)
@@ -45,6 +48,8 @@ class SmolVLMMultiModalProjector(nn.Module):
         new_side = side // scale_factor
         x = x.view(batch, side, side, dim)
         x = x.reshape(batch, new_side, scale_factor, new_side, scale_factor, dim)
+        # ``permute`` interleaves the high-resolution patches so each new token
+        # sees an expanded chunk of the original image.
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
         x = x.reshape(batch, new_side * new_side, dim * (scale_factor ** 2))
         return x

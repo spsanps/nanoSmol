@@ -1,18 +1,22 @@
-"""Configuration objects describing the SmolVLM architecture."""
+"""Configuration dataclasses that describe the minimal SmolVLM layout."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
-from models.smolLM2 import SmolLM2Config
-
-if TYPE_CHECKING:  # pragma: no cover - only for type checkers
+if TYPE_CHECKING:  # pragma: no cover - only needed for static type checkers
     from transformers import Idefics3Config
 
 
 @dataclass
 class SmolVLMVisionConfig:
-    """Hyper-parameters for the SigLIP-style vision transformer."""
+    """Hyper-parameters steering the SigLIP-style vision transformer.
+
+    The vision encoder is a straightforward ViT: images are split into patches,
+    each patch is linearly projected, and a stack of transformer blocks operates
+    over the resulting sequence.  The fields below provide just enough
+    information to rebuild that architecture from scratch in ``vision.py``.
+    """
 
     image_size: int
     patch_size: int
@@ -27,17 +31,27 @@ class SmolVLMVisionConfig:
 
     @property
     def num_patches_per_side(self) -> int:
+        """Number of patches that fit along the height/width of the image."""
+
         return self.image_size // self.patch_size
 
     @property
     def num_patches(self) -> int:
+        """Total patch count in a square grid (used to size positional tables)."""
+
         side = self.num_patches_per_side
         return side * side
 
 
 @dataclass
 class SmolVLMLanguageConfig:
-    """Subset of LLaMA-style parameters used by the language decoder."""
+    """Parameters that define the decoder-only language stack.
+
+    SmolVLM follows a LLaMA-like design: grouped-query attention with rotary
+    embeddings and SwiGLU feed-forward networks.  We keep the dataclass explicit
+    so each hyper-parameter is visible at call sites, mirroring the educational
+    tone of the rest of the project.
+    """
 
     vocab_size: int
     hidden_size: int
@@ -52,26 +66,18 @@ class SmolVLMLanguageConfig:
     tie_embeddings: bool = False
     pad_token_id: int = 0
 
-    def to_smol_lm_config(self) -> SmolLM2Config:
-        return SmolLM2Config(
-            vocab_size=self.vocab_size,
-            d_model=self.hidden_size,
-            n_layers=self.num_hidden_layers,
-            n_heads=self.num_attention_heads,
-            n_kv_heads=self.num_key_value_heads,
-            d_ff=self.intermediate_size,
-            max_seq_len=self.max_position_embeddings,
-            rope_theta=self.rope_theta,
-            dropout=self.dropout,
-            norm_eps=self.rms_norm_eps,
-            tie_embeddings=self.tie_embeddings,
-            pad_token_id=self.pad_token_id,
-        )
+    @property
+    def head_dim(self) -> int:
+        """Dimension of a single attention head (convenience helper)."""
+
+        if self.hidden_size % self.num_attention_heads != 0:
+            raise ValueError("hidden_size must be divisible by num_attention_heads")
+        return self.hidden_size // self.num_attention_heads
 
 
 @dataclass
 class SmolVLMConfig:
-    """Bundle of vision + language parameters plus VL glue settings."""
+    """Bundle vision + language settings together with VL glue metadata."""
 
     vision: SmolVLMVisionConfig
     language: SmolVLMLanguageConfig
@@ -82,11 +88,15 @@ class SmolVLMConfig:
 
     @classmethod
     def from_hf_config(cls, hf_cfg: "Idefics3Config") -> "SmolVLMConfig":
-        """Create a SmolVLMConfig from a Hugging Face Idefics3Config."""
+        """Translate a Hugging Face ``Idefics3Config`` into light-weight dataclasses."""
 
         vision_cfg = hf_cfg.vision_config
         text_cfg = hf_cfg.text_config
 
+        # --- vision -----------------------------------------------------------------
+        # Hugging Face stores the maximum processed size separately from the original
+        # training image size.  Prefer the explicit ``image_size`` attribute when
+        # present, otherwise fall back to ``size["longest_edge"]``.
         vision = SmolVLMVisionConfig(
             image_size=int(getattr(vision_cfg, "image_size", 0) or vision_cfg.size["longest_edge"]),
             patch_size=int(vision_cfg.patch_size),
@@ -100,6 +110,7 @@ class SmolVLMConfig:
             hidden_act=str(getattr(vision_cfg, "hidden_act", "gelu_pytorch_tanh")),
         )
 
+        # --- language ---------------------------------------------------------------
         language = SmolVLMLanguageConfig(
             vocab_size=int(text_cfg.vocab_size),
             hidden_size=int(text_cfg.hidden_size),
@@ -111,10 +122,13 @@ class SmolVLMConfig:
             rope_theta=float(getattr(text_cfg, "rope_theta", 100000.0)),
             rms_norm_eps=float(getattr(text_cfg, "rms_norm_eps", 1e-5)),
             dropout=float(getattr(text_cfg, "attention_dropout", 0.0)),
-            tie_embeddings=bool(getattr(hf_cfg, "tie_word_embeddings", getattr(text_cfg, "tie_word_embeddings", False))),
+            tie_embeddings=bool(
+                getattr(hf_cfg, "tie_word_embeddings", getattr(text_cfg, "tie_word_embeddings", False))
+            ),
             pad_token_id=int(getattr(text_cfg, "pad_token_id", getattr(hf_cfg, "pad_token_id", 0) or 0)),
         )
 
+        # --- multimodal glue --------------------------------------------------------
         scale_factor = int(getattr(hf_cfg, "scale_factor", getattr(text_cfg, "pixel_shuffle_factor", 1)))
         mm_hidden = getattr(hf_cfg, "mm_hidden_size", None)
         if mm_hidden is not None:
@@ -129,9 +143,4 @@ class SmolVLMConfig:
             scale_factor=max(scale_factor, 1),
             mm_hidden_size=mm_hidden,
         )
-
-    def to_language_config(self) -> SmolLM2Config:
-        cfg = self.language.to_smol_lm_config()
-        cfg.pad_token_id = self.pad_token_id
-        return cfg
 

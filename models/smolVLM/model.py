@@ -7,9 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.smolLM2 import SmolLM2
-
 from .config import SmolVLMConfig
+from .language import SmolVLMLanguageModel
 from .projector import SmolVLMMultiModalProjector
 from .vision import SmolVLMVisionEncoder
 
@@ -20,6 +19,9 @@ class SmolVLM(nn.Module):
     def __init__(self, cfg: SmolVLMConfig) -> None:
         super().__init__()
         self.cfg = cfg
+
+        # --- vision + projector --------------------------------------------------
+        # The SigLIP encoder turns raw pixels into a sequence of patch embeddings.
         self.vision_encoder = SmolVLMVisionEncoder(cfg.vision)
         vision_dim = cfg.vision.hidden_size * (cfg.scale_factor ** 2)
         self.mm_projector = SmolVLMMultiModalProjector(
@@ -28,8 +30,13 @@ class SmolVLM(nn.Module):
             scale_factor=cfg.scale_factor,
             hidden_dim=cfg.mm_hidden_size,
         )
-        self.language_model = SmolLM2(cfg.to_language_config())
-        # Initialise the vision + projector layers with the same Gaussian scheme as the text model.
+        # The language model is implemented locally in ``language.py`` rather
+        # than reusing SmolLM2 to keep the code path easy to follow.
+        self.language_model = SmolVLMLanguageModel(cfg.language)
+
+        # Initialise the vision + projector layers with the same Gaussian scheme
+        # used for the language model.  This mirrors the behaviour of the Hugging
+        # Face checkpoints and makes weight-loading round-trips predictable.
         self.vision_encoder.apply(self._init_weights)
         self.mm_projector.apply(self._init_weights)
 
@@ -51,37 +58,47 @@ class SmolVLM(nn.Module):
         pixel_values: torch.Tensor,
         pixel_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Encode images into the language embedding space."""
+        """Encode a batch of images so they can be spliced into the text stream."""
 
-        batch, num_images, channels, height, width = pixel_values.shape
-        dtype = self.language_model.tok_emb.weight.dtype
+        batch_size, images_per_prompt, channels, height, width = pixel_values.shape
+        target_dtype = self.language_model.tok_emb.weight.dtype
         device = pixel_values.device
 
-        flat_pixels = pixel_values.to(dtype=dtype).view(batch * num_images, channels, height, width)
-        nb_values_per_image = flat_pixels.shape[1:].numel()
-        real_images_mask = (flat_pixels == 0.0).sum(dim=(-1, -2, -3)) != nb_values_per_image
-        flat_pixels = flat_pixels[real_images_mask].contiguous()
+        # Merge the batch and image dimensions.  Processor pipelines sometimes
+        # pad the image slots with zeros; we drop those "blank" placeholders to
+        # keep the downstream loops simple.
+        image_grid = pixel_values.to(dtype=target_dtype)
+        image_grid = image_grid.view(batch_size * images_per_prompt, channels, height, width)
+        values_per_image = channels * height * width
+        is_blank_image = (image_grid == 0.0).view(image_grid.size(0), values_per_image).all(dim=1)
+        real_image_mask = ~is_blank_image
+        image_grid = image_grid[real_image_mask].contiguous()
 
+        # Align the optional pixel-level attention mask with the filtered images.
         if pixel_attention_mask is None:
             pixel_attention_mask = torch.ones(
-                size=(flat_pixels.size(0), height, width),
-                dtype=torch.bool,
-                device=device,
+                (image_grid.size(0), height, width), dtype=torch.bool, device=device
             )
         else:
-            pixel_attention_mask = pixel_attention_mask.view(batch * num_images, *pixel_attention_mask.shape[2:])
-            pixel_attention_mask = pixel_attention_mask[real_images_mask].contiguous()
+            pixel_attention_mask = pixel_attention_mask.view(
+                batch_size * images_per_prompt, *pixel_attention_mask.shape[2:]
+            )
+            pixel_attention_mask = pixel_attention_mask[real_image_mask].contiguous()
 
-        if flat_pixels.numel() == 0:
-            return torch.zeros((0, 0, self.cfg.language.hidden_size), device=device, dtype=dtype)
+        if image_grid.numel() == 0:
+            return torch.zeros((0, 0, self.cfg.language.hidden_size), device=device, dtype=target_dtype)
 
+        # Convert pixel-level masks to patch-level masks.  ``unfold`` slides a
+        # non-overlapping window so we can flag patches that contain any valid
+        # pixels.  SigLIP treats masked patches as padding, so we only need a
+        # boolean indicator per patch.
         patch_size = self.cfg.vision.patch_size
         patches = pixel_attention_mask.unfold(1, patch_size, patch_size).unfold(2, patch_size, patch_size)
-        patch_attention_mask = (patches.sum(dim=(-1, -2)) > 0)
+        patch_attention_mask = patches.sum(dim=(-1, -2)) > 0
 
-        vision_hidden = self.vision_encoder(flat_pixels, patch_attention_mask=patch_attention_mask)
+        vision_hidden = self.vision_encoder(image_grid, patch_attention_mask=patch_attention_mask)
         projected = self.mm_projector(vision_hidden)
-        return projected.to(dtype=dtype)
+        return projected.to(dtype=target_dtype)
 
     def _merge_image_embeddings(
         self,
@@ -91,11 +108,16 @@ class SmolVLM(nn.Module):
     ) -> torch.Tensor:
         if image_hidden_states.numel() == 0:
             return inputs_embeds
+
         image_hidden_states = image_hidden_states.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-        special_mask = (input_ids == self.cfg.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-        if int(special_mask.sum().item()) != image_hidden_states.numel():
+
+        # ``<image>`` placeholders are expanded into full sequences of embeddings.
+        image_token_mask = (input_ids == self.cfg.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+        expected_values = int(image_token_mask.sum().item())
+        if expected_values != image_hidden_states.numel():
             raise ValueError("Mismatch between number of <image> tokens and image hidden states")
-        merged = inputs_embeds.masked_scatter(special_mask, image_hidden_states.reshape(-1))
+
+        merged = inputs_embeds.masked_scatter(image_token_mask, image_hidden_states.reshape(-1))
         return merged.view_as(inputs_embeds)
 
     def _run_language_model(
@@ -105,19 +127,15 @@ class SmolVLM(nn.Module):
         attention_mask: Optional[torch.Tensor],
         position_ids: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        batch, seq_len, _ = inputs_embeds.shape
-        attn_mask, pos_ids = self.language_model._prepare_attention_inputs(
-            attention_mask,
-            position_ids,
-            batch=batch,
-            seq_len=seq_len,
-            device=inputs_embeds.device,
+        # Delegate to the hand-written language model so the bridging logic lives
+        # in one place.  ``forward_from_embeddings`` simply wraps the standard
+        # ``forward`` method but skips the embedding lookup because we already
+        # replaced ``<image>`` tokens with vision features.
+        return self.language_model.forward_from_embeddings(
+            inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
         )
-        hidden_states = self.language_model.dropout(inputs_embeds)
-        for block in self.language_model.blocks:
-            hidden_states = block(hidden_states, attn_mask=attn_mask, position_ids=pos_ids)
-        hidden_states = self.language_model.norm_out(hidden_states)
-        return self.language_model.lm_head(hidden_states)
 
     # -------------------------------------------------------------------- forward
     def forward(
