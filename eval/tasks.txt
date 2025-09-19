@@ -1,0 +1,5 @@
+leaderboard|mmlu|0|0
+leaderboard|hellaswag|0|0
+lighteval|mmmu_pro|0|0
+
+# lighteval|mmmu|0|0
