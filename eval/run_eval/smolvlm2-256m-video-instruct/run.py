@@ -4,7 +4,7 @@
 The wrapper mirrors the configuration used in the SmolVLM2 baseline blog posts:
 
 - Zero-shot prompting with the official chat template.
-- Deterministic decoding (`do_sample=false`, `temperature=0.0`, `top_p=1.0`, `max_new_tokens=64`).
+- Deterministic decoding (`temperature=0.0`, `top_p=1.0`, `max_new_tokens=64`) via LightEval's greedy default.
 - Transformer VLM backend with bfloat16 weights and automatic device placement.
 """
 
@@ -35,7 +35,6 @@ _BASE_MODEL_ARGS = {
     "device_map": "auto",
 }
 _BASE_GENERATION_ARGS = {
-    "do_sample": False,
     "temperature": 0.0,
     "top_p": 1.0,
     "max_new_tokens": 64,
