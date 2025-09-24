@@ -5,9 +5,8 @@ The script composes the `python -m lighteval accelerate` call with the zero-shot
 settings requested in the baseline plan:
 
 - Deterministic decoding (no sampling, 64 new tokens, `temperature=0.0`, `top_p=1.0`).
-- Chat templating forced through `override_chat_template=True` in the model args.
 - Vision model loader (`--vision-model`) so image inputs are handled correctly.
-- bfloat16 weights with `device_map=auto` and `trust_remote_code=True`.
+- bfloat16 weights with `trust_remote_code=True` and the model's built-in chat template.
 
 Edit the constants below if you want to experiment with alternative checkpoints.
 """
@@ -36,8 +35,7 @@ _BASE_MODEL_ARGS = {
     "dtype": "bfloat16",
     "batch_size": 1,
     "trust_remote_code": True,
-    "device_map": "auto",
-    "override_chat_template": True,
+    "device": "cuda",
 }
 _BASE_GENERATION_ARGS = {
     "temperature": 0.0,
@@ -47,15 +45,18 @@ _BASE_GENERATION_ARGS = {
 
 
 def _encode_generation_parameters(params: dict[str, Any]) -> str:
-    """Convert the generation dictionary into the LightEval CLI mini-JSON format."""
+    """Convert the generation dictionary into the LightEval CLI key=value format."""
 
     pieces: list[str] = []
     for key, value in params.items():
+        # LightEval expects nested pairs as `key=value` without Python quoting.
         if isinstance(value, bool):
             json_value = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            json_value = str(value)
         else:
             json_value = json.dumps(value)
-        pieces.append(f"{key}:{json_value}")
+        pieces.append(f"{key}={json_value}")
     return "{" + ",".join(pieces) + "}"
 
 
