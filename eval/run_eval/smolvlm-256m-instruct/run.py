@@ -5,7 +5,7 @@ The script composes the `python -m lighteval accelerate` call with the zero-shot
 settings requested in the baseline plan:
 
 - Deterministic decoding (no sampling, 64 new tokens, `temperature=0.0`, `top_p=1.0`).
-- Chat templating enabled via `--use-chat-template`.
+- Chat templating forced through `override_chat_template=True` in the model args.
 - Vision model loader (`--vision-model`) so image inputs are handled correctly.
 - bfloat16 weights with `device_map=auto` and `trust_remote_code=True`.
 
@@ -37,6 +37,7 @@ _BASE_MODEL_ARGS = {
     "batch_size": 1,
     "trust_remote_code": True,
     "device_map": "auto",
+    "override_chat_template": True,
 }
 _BASE_GENERATION_ARGS = {
     "temperature": 0.0,
@@ -135,7 +136,6 @@ def main() -> int:
         tasks_argument,
         "--output-dir",
         str(args.output_dir),
-        "--use-chat-template",
         "--vision-model",
         "--dataset-loading-processes",
         str(args.dataset_loading_processes),
