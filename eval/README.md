@@ -36,7 +36,7 @@ Each model has a dedicated helper under [`run_eval/`](./run_eval/) that wraps th
 `python -m lighteval accelerate` entrypoint.  The scripts set:
 
 - `vision_model=True` so LightEval uses the VLM transformer loader.
-- The SmolVLM chat template (`--use-chat-template`).
+- The SmolVLM chat template enforced through `override_chat_template=True` in the model args.
 - Deterministic decoding (`temperature=0.0`, `top_p=1.0`, `max_new_tokens=64`) using LightEval's greedy default.
 - `dtype=bfloat16`, `device_map=auto`, and `trust_remote_code=True` to match the official configs.
 
