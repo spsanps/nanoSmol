@@ -1,0 +1,25 @@
+# CPU-friendly smoke test config for HellaSwag.
+task: hellaswag
+model:
+  model_id: sshleifer/tiny-gpt2
+  is_vlm: false
+  dtype: float32
+  device: cpu
+  trust_remote_code: false
+  attn_impl: null
+scoring:
+  strategy: rank_ll
+  max_new_tokens: 4
+  seed: 7
+report:
+  output_dir: artifacts/nanoeval/hellaswag/tiny-gpt2
+  summary_filename: summary.json
+  predictions_filename: predictions.jsonl
+  table_filename: metrics.csv
+  plot_filename: accuracy.png
+  save_predictions: true
+  save_table: true
+  save_plot: false
+dataset:
+  split: validation
+  subset_size: 3
