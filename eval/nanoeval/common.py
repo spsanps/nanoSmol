@@ -90,7 +90,27 @@ class SimpleModel:
         """Greedily decode a short answer and return the first valid letter."""
 
         if self.processor is not None:
-            raise RuntimeError("Vision-language models must use generate_letter_vlm")
+            # Vision-language checkpoints (e.g. SmolVLM) still need to answer
+            # text-only prompts for MMLU / HellaSwag.  We mirror the chat-style
+            # interface but provide no images so the call path stays uniform.
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt,
+                        }
+                    ],
+                }
+            ]
+            return self.generate_letter_vlm(
+                messages,
+                images=(),
+                allowed_letters=allowed_letters,
+                max_new_tokens=max_new_tokens,
+            )
+
         encoded = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         output_ids = self.model.generate(
             **encoded,
