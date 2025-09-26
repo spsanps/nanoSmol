@@ -9,7 +9,8 @@ around Hugging Face models used to score multiple-choice prompts.
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Sequence
+from string import ascii_uppercase
+from typing import List, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +25,19 @@ from .config import ModelConfig
 
 LETTER4: tuple[str, ...] = ("A", "B", "C", "D")
 LETTER10: tuple[str, ...] = LETTER4 + ("E", "F", "G", "H", "I", "J")
+
+
+def build_letter_choices(count: int) -> tuple[str, ...]:
+    """Return an ordered tuple of letter labels long enough for ``count`` options."""
+
+    if count < 1:
+        raise ValueError("Multiple-choice prompts must include at least one option")
+    if count <= len(ascii_uppercase):
+        return tuple(ascii_uppercase[:count])
+    raise ValueError(
+        "NanoEval currently supports up to 26 answer choices; "
+        f"received {count}"
+    )
 
 _DTYPE_LOOKUP = {
     "bfloat16": torch.bfloat16,
@@ -118,9 +132,7 @@ class SimpleModel:
             max_new_tokens=max_new_tokens,
         )
         decoded = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        match = re.search(r"[A-J]", decoded)
-        allowed = set(allowed_letters)
-        return match.group(0) if match and match.group(0) in allowed else ""
+        return _extract_choice(decoded, allowed_letters)
 
     @torch.no_grad()
     def rank_log_likelihood(self, prompt: str, options: Sequence[str]) -> int:
@@ -170,9 +182,31 @@ class SimpleModel:
             max_new_tokens=max_new_tokens,
         )
         decoded = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
-        match = re.search(r"[A-J]", decoded)
-        allowed = set(allowed_letters)
-        return match.group(0) if match and match.group(0) in allowed else ""
+        return _extract_choice(decoded, allowed_letters)
 
 
-__all__ = ["LETTER4", "LETTER10", "set_seed", "SimpleModel"]
+def _extract_choice(decoded: str, allowed_letters: Sequence[str]) -> str:
+    """Return the first allowed letter found in ``decoded`` text."""
+
+    if not allowed_letters:
+        return ""
+    allowed_lookup = {letter.upper(): letter for letter in allowed_letters}
+    pattern = r"\\b(" + "|".join(re.escape(letter) for letter in allowed_lookup) + r")\\b"
+    match = re.search(pattern, decoded, flags=re.IGNORECASE)
+    if match:
+        candidate = match.group(1).upper()
+        return allowed_lookup.get(candidate, "")
+    for char in decoded:
+        letter = allowed_lookup.get(char.upper())
+        if letter:
+            return letter
+    return ""
+
+
+__all__ = [
+    "LETTER4",
+    "LETTER10",
+    "build_letter_choices",
+    "set_seed",
+    "SimpleModel",
+]

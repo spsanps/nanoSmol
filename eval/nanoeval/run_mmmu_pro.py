@@ -12,7 +12,7 @@ from datasets import load_dataset
 from PIL import Image
 from tqdm import tqdm
 
-from .common import LETTER10, LETTER4, SimpleModel, set_seed
+from .common import SimpleModel, build_letter_choices, set_seed
 from .config import MMMUProRunConfig, load_task_config
 from .prompts import MMMU_VQA_ZERO_SHOT
 from .reporting import ReportWriter
@@ -59,13 +59,9 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
 
     for example in tqdm(dataset, desc=f"mmmu_pro:{config.dataset.subset_name}"):
         options: List[str] = example["options"]
-        if len(options) > len(LETTER10):
-            raise ValueError(
-                "MMMU-Pro examples cannot expose more than ten answer choices"
-            )
-        letters = LETTER4 if len(options) <= len(LETTER4) else LETTER10
+        letters = build_letter_choices(len(options))
         prompt = MMMU_VQA_ZERO_SHOT.format(
-            letters=", ".join(letters[: len(options)]),
+            letters=", ".join(letters),
             question=example["question"],
             options_block="\n".join(
                 f"{letters[idx]}. {choice}" for idx, choice in enumerate(options)
@@ -81,7 +77,12 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
             model.generate_letter_vlm(messages, images, letters, config.scoring.max_new_tokens)
             or "?"
         )
-        gold = example["answer"]
+        gold = str(example["answer"]).strip().upper()
+        if gold not in letters:
+            raise ValueError(
+                "Gold answer label not present in generated choice labels: "
+                f"gold={gold!r}, labels={letters}, id={example.get('id', '')}",
+            )
         is_correct = prediction == gold
         correct += int(is_correct)
         records.append(
