@@ -59,7 +59,11 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
 
     for example in tqdm(dataset, desc=f"mmmu_pro:{config.dataset.subset_name}"):
         options: List[str] = example["options"]
-        letters = LETTER10 if len(options) == 10 else LETTER4
+        if len(options) > len(LETTER10):
+            raise ValueError(
+                "MMMU-Pro examples cannot expose more than ten answer choices"
+            )
+        letters = LETTER4 if len(options) <= len(LETTER4) else LETTER10
         prompt = MMMU_VQA_ZERO_SHOT.format(
             letters=", ".join(letters[: len(options)]),
             question=example["question"],
