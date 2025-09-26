@@ -15,7 +15,7 @@ import torch
 import torch.nn.functional as F
 from transformers import (
     AutoModelForCausalLM,
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     AutoProcessor,
     AutoTokenizer,
 )
@@ -59,10 +59,10 @@ class SimpleModel:
             self.processor = AutoProcessor.from_pretrained(
                 cfg.model_id, trust_remote_code=cfg.trust_remote_code
             )
-            model_kwargs = {"torch_dtype": torch_dtype}
+            model_kwargs = {"dtype": torch_dtype}
             if self.device.startswith("cuda") and cfg.attn_impl:
                 model_kwargs["_attn_implementation"] = cfg.attn_impl
-            self.model = AutoModelForVision2Seq.from_pretrained(
+            self.model = AutoModelForImageTextToText.from_pretrained(
                 cfg.model_id, **model_kwargs
             ).to(self.device)
             self.tokenizer = None
@@ -73,7 +73,7 @@ class SimpleModel:
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model = AutoModelForCausalLM.from_pretrained(
-                cfg.model_id, torch_dtype=torch_dtype
+                cfg.model_id, dtype=torch_dtype
             ).to(self.device)
             self.processor = None
 

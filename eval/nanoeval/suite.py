@@ -11,9 +11,6 @@ from typing import Dict, List, Sequence
 import yaml
 
 from .config import ModelConfig, TaskConfig, build_model_config, build_task_config
-from .run_hellaswag import run as run_hellaswag
-from .run_mmlu import run as run_mmlu
-from .run_mmmu_pro import run as run_mmmu_pro
 
 
 @dataclass
@@ -71,10 +68,16 @@ def load_suite_config(path: Path) -> SuiteConfig:
 
 def _run_task(task: TaskConfig) -> Dict[str, object]:
     if task.task == "mmlu":  # type: ignore[comparison-overlap]
+        from .run_mmlu import run as run_mmlu
+
         summary = run_mmlu(task)  # type: ignore[arg-type]
     elif task.task == "hellaswag":
+        from .run_hellaswag import run as run_hellaswag
+
         summary = run_hellaswag(task)  # type: ignore[arg-type]
     else:
+        from .run_mmmu_pro import run as run_mmmu_pro
+
         summary = run_mmmu_pro(task)  # type: ignore[arg-type]
     return {"task": task.task, **summary}
 
