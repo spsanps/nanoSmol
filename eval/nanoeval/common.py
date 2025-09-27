@@ -28,16 +28,24 @@ LETTER10: tuple[str, ...] = LETTER4 + ("E", "F", "G", "H", "I", "J")
 
 
 def build_letter_choices(count: int) -> tuple[str, ...]:
-    """Return an ordered tuple of letter labels long enough for ``count`` options."""
+    """Return ``count`` Excel-style letter labels (A..Z, AA, AB, ...)."""
 
     if count < 1:
         raise ValueError("Multiple-choice prompts must include at least one option")
-    if count <= len(ascii_uppercase):
-        return tuple(ascii_uppercase[:count])
-    raise ValueError(
-        "NanoEval currently supports up to 26 answer choices; "
-        f"received {count}"
-    )
+
+    labels: List[str] = []
+    for index in range(count):
+        # Excel-style base-26 conversion that stays within uppercase ASCII.
+        value = index
+        label_parts: List[str] = []
+        while True:
+            value, remainder = divmod(value, len(ascii_uppercase))
+            label_parts.append(ascii_uppercase[remainder])
+            if value == 0:
+                break
+            value -= 1
+        labels.append("".join(reversed(label_parts)))
+    return tuple(labels)
 
 _DTYPE_LOOKUP = {
     "bfloat16": torch.bfloat16,
@@ -191,7 +199,9 @@ def _extract_choice(decoded: str, allowed_letters: Sequence[str]) -> str:
     if not allowed_letters:
         return ""
     allowed_lookup = {letter.upper(): letter for letter in allowed_letters}
-    pattern = r"\\b(" + "|".join(re.escape(letter) for letter in allowed_lookup) + r")\\b"
+    # Sort by decreasing length so multi-character labels (e.g. "AA") match before "A".
+    sorted_letters = sorted(allowed_lookup, key=len, reverse=True)
+    pattern = r"\\b(" + "|".join(re.escape(letter) for letter in sorted_letters) + r")\\b"
     match = re.search(pattern, decoded, flags=re.IGNORECASE)
     if match:
         candidate = match.group(1).upper()

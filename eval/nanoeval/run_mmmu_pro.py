@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -18,6 +19,38 @@ from .prompts import MMMU_VQA_ZERO_SHOT
 from .reporting import ReportWriter
 
 IMAGE_COLUMNS = tuple(f"image_{idx}" for idx in range(1, 8))
+
+
+def _parse_options(raw) -> List[str]:
+    """Return a list of option strings regardless of how ``raw`` is stored."""
+
+    if isinstance(raw, list):
+        return [str(option) for option in raw]
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        if text[0] in "[({":
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if isinstance(parsed, (list, tuple)):
+                return [str(option) for option in parsed]
+        candidates: List[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if len(stripped) >= 2 and stripped[1] in ".):" and stripped[0].isalnum():
+                stripped = stripped[2:].strip()
+            candidates.append(stripped)
+        if candidates:
+            return candidates
+        return [text]
+
+    raise TypeError(f"Unsupported options payload of type {type(raw)!r}")
 
 
 def _ensure_image(value) -> Image.Image:
@@ -58,7 +91,12 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
     correct = 0
 
     for example in tqdm(dataset, desc=f"mmmu_pro:{config.dataset.subset_name}"):
-        options: List[str] = example["options"]
+        options = _parse_options(example["options"])
+        if not options:
+            raise ValueError(
+                "Encountered an MMMU-Pro example without options: "
+                f"id={example.get('id', '')}"
+            )
         letters = build_letter_choices(len(options))
         prompt = MMMU_VQA_ZERO_SHOT.format(
             letters=", ".join(letters),
