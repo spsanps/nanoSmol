@@ -1,5 +1,38 @@
 # SmolVLM Baseline Evaluations
 
+## NanoEval (LightEval-free runners)
+
+`eval/nanoeval` now ships a config-driven alternative to LightEval.  Every
+benchmark exposes a single module that reads a YAML document, constructs the
+requested model, iterates over the dataset once, and writes:
+
+* `predictions.jsonl` — per-example rows for debugging.
+* `summary.json` — aggregate metrics, scoring parameters, and model metadata.
+* `metrics.csv` + `accuracy.png` — quick-look report of the primary score.
+
+All runtime options live in the YAML.  Point `NANOEVAL_CONFIG` at the file and
+launch the module:
+
+```bash
+export NANOEVAL_CONFIG=eval/nanoeval/configs/mmlu_tiny.yaml
+python -m eval.nanoeval.run_mmlu
+
+export NANOEVAL_CONFIG=eval/nanoeval/configs/hellaswag_tiny.yaml
+python -m eval.nanoeval.run_hellaswag
+
+# Requires a VLM checkpoint and the MMMU-Pro dataset access token.
+export NANOEVAL_CONFIG=eval/nanoeval/configs/mmmu_pro_smolvlm.yaml
+python -m eval.nanoeval.run_mmmu_pro
+```
+
+Suites under ``eval/nanoeval/suites`` bundle these tasks for a given checkpoint,
+writing a ``suite_summary.json`` alongside the per-task artefacts.  The smoke
+suite targets ``sshleifer/tiny-gpt2`` so it can run on CPU in under a minute.
+
+Copy the example configs in `eval/nanoeval/configs/`, adjust the `model` and
+`dataset` sections, and re-run.  Outputs default to `artifacts/nanoeval/<task>/`
+so experiments stay isolated from the repo tree.
+
 This directory wires up the LightEval baselines for the 256M SmolVLM checkpoints.  The goal is to
 reproduce the paper/blog zero-shot numbers on the LightEval-supported suites that cover both text
 and image reasoning tasks.

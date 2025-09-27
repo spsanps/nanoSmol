@@ -1,0 +1,26 @@
+# Zero-shot MMLU run mirroring the SmolVLM LightEval baseline.
+task: mmlu
+model:
+  model_id: HuggingFaceTB/SmolVLM-256M-Instruct
+  is_vlm: false
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+  attn_impl: flash_attention_2
+scoring:
+  strategy: gen_letter
+  max_new_tokens: 8
+  seed: 123
+report:
+  output_dir: artifacts/nanoeval/mmlu/smolvlm-256m
+  summary_filename: summary.json
+  predictions_filename: predictions.jsonl
+  table_filename: metrics.csv
+  plot_filename: accuracy.png
+  save_predictions: true
+  save_table: true
+  save_plot: true
+# Evaluate every MMLU subject on the test split.
+dataset:
+  split: test
+  subset_size: null

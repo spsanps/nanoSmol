@@ -1,0 +1,27 @@
+suite:
+  name: smoke-text
+model:
+  model_id: sshleifer/tiny-gpt2
+  is_vlm: false
+  dtype: float32
+  device: cpu
+  trust_remote_code: false
+tasks:
+  - task: mmlu
+    dataset:
+      split: test
+      subjects:
+        - high_school_mathematics
+      subset_size: 4
+    scoring:
+      strategy: rank_ll
+      max_new_tokens: 4
+      seed: 123
+  - task: hellaswag
+    dataset:
+      split: validation
+      subset_size: 8
+    scoring:
+      strategy: rank_ll
+      max_new_tokens: 4
+      seed: 123
