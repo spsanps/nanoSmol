@@ -11,6 +11,9 @@ quick sampling for the minimal implementation in `models/smolVLM/`.
   teacher-forced comparison for a text+image prompt.
 - `generate_smoke.py` — loads the weights and produces a short generated
   response to a tiny text+image input.
+- `run_nanoeval_suite.py` — executes the tiny ``suite_smoke.yaml`` config,
+  providing an end-to-end check that the config loader, report writer, and
+  scoring helpers work together.
 
 By default the scripts target `HuggingFaceTB/SmolVLM-256M-Base`, which is
 public.  Pass `--hf-model` to point at private or fine-tuned variants such as
