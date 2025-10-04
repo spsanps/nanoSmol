@@ -49,4 +49,6 @@ before reshaping; downstream values still match.)
 
 The other scripts (`compare_hf_vs_local.py`, `dump_first_diff_layer.py`, and
 `generate_smoke.py`) continue to work as small parity and sampling tools.  They
-now import the refactored package layout without modification.
+now import the refactored package layout without modification.  Use
+`run_nanoeval_suite.py` to execute the tiny ``suite_smoke.yaml`` configuration
+and check that the evaluation harness remains wired correctly.
