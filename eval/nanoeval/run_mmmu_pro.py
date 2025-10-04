@@ -81,6 +81,11 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
     set_seed(config.scoring.seed)
     if not config.model.is_vlm:
         raise ValueError("MMMU-Pro requires a vision-language model")
+    if config.scoring.strategy != "gen_letter":
+        raise ValueError(
+            "MMMU-Pro currently supports only 'gen_letter' scoring; "
+            f"received {config.scoring.strategy!r}"
+        )
 
     model = SimpleModel(config.model)
     dataset = load_dataset("MMMU/MMMU_Pro", name=config.dataset.subset_name, split=config.dataset.split)
