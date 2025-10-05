@@ -8,8 +8,6 @@ model:
   trust_remote_code: false
   attn_impl: null
 scoring:
-  strategy: rank_ll
-  max_new_tokens: 4
   seed: 7
 report:
   output_dir: artifacts/nanoeval/mmlu/tiny-gpt2

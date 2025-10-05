@@ -22,10 +22,8 @@ class ModelConfig:
 
 @dataclass
 class ScoringConfig:
-    """Options controlling how answers are generated or scored."""
+    """Options controlling deterministic scoring."""
 
-    strategy: Literal["gen_letter", "rank_ll"] = "gen_letter"
-    max_new_tokens: int = 8
     seed: int = 123
 
 
@@ -137,11 +135,7 @@ def build_model_config(data: Mapping[str, Any]) -> ModelConfig:
 def _build_scoring_config(data: Mapping[str, Any] | None) -> ScoringConfig:
     if not data:
         return ScoringConfig()
-    return ScoringConfig(
-        strategy=str(data.get("strategy", "gen_letter")),
-        max_new_tokens=int(data.get("max_new_tokens", 8)),
-        seed=int(data.get("seed", 123)),
-    )
+    return ScoringConfig(seed=int(data.get("seed", 123)))
 
 
 def _build_mmlu_dataset(data: Mapping[str, Any] | None) -> MMLUDatasetConfig:

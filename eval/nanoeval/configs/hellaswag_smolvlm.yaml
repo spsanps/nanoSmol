@@ -8,8 +8,6 @@ model:
   trust_remote_code: true
   attn_impl: flash_attention_2
 scoring:
-  strategy: rank_ll
-  max_new_tokens: 8
   seed: 123
 report:
   output_dir: artifacts/nanoeval/hellaswag/smolvlm-256m

@@ -13,15 +13,7 @@ tasks:
       subjects:
         - high_school_mathematics
       subset_size: 4
-    scoring:
-      strategy: rank_ll
-      max_new_tokens: 4
-      seed: 123
   - task: hellaswag
     dataset:
       split: validation
       subset_size: 8
-    scoring:
-      strategy: rank_ll
-      max_new_tokens: 4
-      seed: 123

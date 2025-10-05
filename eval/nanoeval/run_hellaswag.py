@@ -20,8 +20,6 @@ def run(config: HellaSwagRunConfig) -> Dict[str, object]:
     """Evaluate HellaSwag according to ``config`` and return a summary payload."""
 
     set_seed(config.scoring.seed)
-    if config.scoring.strategy == "rank_ll" and config.model.is_vlm:
-        raise ValueError("Log-likelihood scoring requires a text-only model")
 
     model = SimpleModel(config.model)
     dataset = load_dataset("Rowan/hellaswag", split=config.dataset.split)
@@ -41,11 +39,10 @@ def run(config: HellaSwagRunConfig) -> Dict[str, object]:
         )
         gold_index = int(example["label"])
 
-        if config.scoring.strategy == "rank_ll":
-            predicted_index = model.rank_log_likelihood(prompt, example["endings"])
-        else:
-            letter = model.generate_letter_text(prompt, LETTER4, config.scoring.max_new_tokens)
-            predicted_index = LETTER4.index(letter) if letter in LETTER4 else -1
+        scoring_options = [
+            f"{LETTER4[idx]}. {ending}" for idx, ending in enumerate(example["endings"])
+        ]
+        predicted_index = model.rank_log_likelihood(prompt, scoring_options)
 
         is_correct = predicted_index == gold_index
         correct += int(is_correct)
@@ -71,8 +68,7 @@ def run(config: HellaSwagRunConfig) -> Dict[str, object]:
             "total_examples": total,
             "split": config.dataset.split,
             "subset_size": config.dataset.subset_size,
-            "scoring": config.scoring.strategy,
-            "max_new_tokens": config.scoring.max_new_tokens,
+            "scoring": "rank_ll",
             "seed": config.scoring.seed,
             "model_id": config.model.model_id,
         }

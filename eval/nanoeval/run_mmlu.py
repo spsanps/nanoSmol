@@ -110,8 +110,6 @@ def run(config: MMLURunConfig) -> Dict[str, object]:
     """Evaluate MMLU according to ``config`` and return the summary payload."""
 
     set_seed(config.scoring.seed)
-    if config.scoring.strategy == "rank_ll" and config.model.is_vlm:
-        raise ValueError("Log-likelihood scoring requires a text-only model")
 
     model = SimpleModel(config.model)
     subjects = _select_subjects(config)
@@ -133,16 +131,14 @@ def run(config: MMLURunConfig) -> Dict[str, object]:
                 C=example["choices"][2],
                 D=example["choices"][3],
             )
-            gold = example["answer"]
-            if config.scoring.strategy == "rank_ll":
-                choice_index = model.rank_log_likelihood(prompt, example["choices"])
-                predicted = LETTER4[choice_index]
-            else:
-                predicted = (
-                    model.generate_letter_text(prompt, LETTER4, config.scoring.max_new_tokens)
-                    or "?"
-                )
-            is_correct = predicted == gold
+            gold_index = int(example["answer"])
+            gold_letter = LETTER4[gold_index]
+            scoring_options = [
+                f"{LETTER4[idx]}. {choice}" for idx, choice in enumerate(example["choices"])
+            ]
+            choice_index = model.rank_log_likelihood(prompt, scoring_options)
+            predicted = LETTER4[choice_index]
+            is_correct = predicted == gold_letter
             correct += int(is_correct)
             total += 1
             records.append(
@@ -150,7 +146,7 @@ def run(config: MMLURunConfig) -> Dict[str, object]:
                     "task": "mmlu",
                     "subject": subject,
                     "index": index,
-                    "gold": gold,
+                    "gold": gold_letter,
                     "prediction": predicted,
                     "correct": bool(is_correct),
                 }
@@ -165,8 +161,7 @@ def run(config: MMLURunConfig) -> Dict[str, object]:
     writer.write_summary(
         {
             **summary,
-            "scoring": config.scoring.strategy,
-            "max_new_tokens": config.scoring.max_new_tokens,
+            "scoring": "rank_ll",
             "seed": config.scoring.seed,
             "subjects": list(subjects),
             "split": config.dataset.split,

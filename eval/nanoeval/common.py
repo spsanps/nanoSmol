@@ -9,7 +9,6 @@ around Hugging Face models used to score multiple-choice prompts.
 from __future__ import annotations
 
 import random
-import re
 from string import ascii_uppercase
 from typing import List, Sequence
 
@@ -108,61 +107,97 @@ class SimpleModel:
 
     # --------------------------------------------------------------------- text
     @torch.no_grad()
-    def generate_letter_text(
-        self,
-        prompt: str,
-        allowed_letters: Sequence[str],
-        max_new_tokens: int,
-    ) -> str:
-        """Greedily decode a short answer and return the first valid letter."""
+    def rank_log_likelihood(self, prompt: str, options: Sequence[str]) -> int:
+        """Return the index of the option with the highest summed log-prob."""
 
-        if self.processor is not None:
-            # Vision-language checkpoints (e.g. SmolVLM) still need to answer
-            # text-only prompts for MMLU / HellaSwag.  We mirror the chat-style
-            # interface but provide no images so the call path stays uniform.
-            messages = [
+        if self.processor is None:
+            return self._rank_text(prompt, options)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    }
+                ],
+            }
+        ]
+        return self.rank_log_likelihood_multimodal(messages, (), options)
+
+    @torch.no_grad()
+    def rank_log_likelihood_multimodal(
+        self,
+        messages: Sequence[dict],
+        images: Sequence[object],
+        options: Sequence[str],
+    ) -> int:
+        """Rank ``options`` given multimodal ``messages`` and ``images``."""
+
+        if self.processor is None:
+            raise RuntimeError("Text models must call rank_log_likelihood()")
+        if not options:
+            raise ValueError("Multiple-choice prompts must include at least one option")
+
+        prompt_text = self.processor.apply_chat_template(
+            list(messages), add_generation_prompt=True
+        )
+        prompt_inputs = self.processor(
+            text=prompt_text,
+            images=list(images) if images else None,
+            return_tensors="pt",
+        )
+        prompt_len = prompt_inputs["input_ids"].shape[1]
+
+        scores: List[float] = []
+        for candidate in options:
+            assistant_text = (
+                candidate
+                if not candidate or candidate[0].isspace()
+                else " " + candidate
+            )
+            convo = list(messages) + [
                 {
-                    "role": "user",
+                    "role": "assistant",
                     "content": [
                         {
                             "type": "text",
-                            "text": prompt,
+                            "text": assistant_text,
                         }
                     ],
                 }
             ]
-            return self.generate_letter_vlm(
-                messages,
-                images=(),
-                allowed_letters=allowed_letters,
-                max_new_tokens=max_new_tokens,
+            convo_text = self.processor.apply_chat_template(
+                convo, add_generation_prompt=False
             )
+            convo_inputs = self.processor(
+                text=convo_text,
+                images=list(images) if images else None,
+                return_tensors="pt",
+            )
+            inputs = {k: v.to(self.device) for k, v in convo_inputs.items()}
+            input_ids = inputs["input_ids"]
+            outputs = self.model(**inputs)
+            logits = outputs.logits[:, :-1, :]
+            targets = input_ids[:, 1:]
+            log_probs = F.log_softmax(logits, dim=-1)
+            gathered = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+            option_token_count = input_ids.shape[1] - prompt_len
+            scores.append(gathered[0, -option_token_count:].sum().item())
 
-        encoded = self.tokenizer(prompt, return_tensors="pt")
-        prompt_len = encoded.input_ids.shape[1]
-        encoded = encoded.to(self.device)
-        output_ids = self.model.generate(
-            **encoded,
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
-        )
-        generated_tokens = output_ids[:, prompt_len:]
-        decoded = self.tokenizer.decode(
-            generated_tokens[0], skip_special_tokens=True
-        )
-        return _extract_choice(decoded, allowed_letters)
+        best_index = max(range(len(options)), key=scores.__getitem__)
+        return int(best_index)
 
-    @torch.no_grad()
-    def rank_log_likelihood(self, prompt: str, options: Sequence[str]) -> int:
-        """Return the index of the option with the highest summed log-prob."""
-
-        if self.processor is not None:
-            raise RuntimeError("Log-likelihood scoring only applies to text models")
-
+    def _rank_text(self, prompt: str, options: Sequence[str]) -> int:
+        if not options:
+            raise ValueError("Multiple-choice prompts must include at least one option")
         scores: List[float] = []
         prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         for candidate in options:
-            option_ids = self.tokenizer.encode(" " + candidate, add_special_tokens=False)
+            option_ids = self.tokenizer.encode(
+                " " + candidate, add_special_tokens=False
+            )
             input_ids = torch.tensor([prompt_ids + option_ids], device=self.device)
             outputs = self.model(input_ids=input_ids)
             logits = outputs.logits[:, :-1, :]
@@ -172,60 +207,6 @@ class SimpleModel:
             scores.append(gathered[0, -len(option_ids) :].sum().item())
         best_index = max(range(len(options)), key=scores.__getitem__)
         return int(best_index)
-
-    # ---------------------------------------------------------------------- vlm
-    @torch.no_grad()
-    def generate_letter_vlm(
-        self,
-        messages: Sequence[dict],
-        images: Sequence[object],
-        allowed_letters: Sequence[str],
-        max_new_tokens: int,
-    ) -> str:
-        """Mirror chat-style prompting for VLMs such as SmolVLM."""
-
-        if self.processor is None:
-            raise RuntimeError("Text models must use generate_letter_text")
-        prompt = self.processor.apply_chat_template(
-            list(messages), add_generation_prompt=True
-        )
-        inputs = self.processor(
-            text=prompt,
-            images=list(images) if images else None,
-            return_tensors="pt",
-        )
-        prompt_len = inputs["input_ids"].shape[1]
-        inputs = inputs.to(self.device)
-        output_ids = self.model.generate(
-            **inputs,
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
-        )
-        generated_tokens = output_ids[:, prompt_len:]
-        decoded = self.processor.batch_decode(
-            generated_tokens, skip_special_tokens=True
-        )[0]
-        return _extract_choice(decoded, allowed_letters)
-
-
-def _extract_choice(decoded: str, allowed_letters: Sequence[str]) -> str:
-    """Return the first allowed letter found in ``decoded`` text."""
-
-    if not allowed_letters:
-        return ""
-    allowed_lookup = {letter.upper(): letter for letter in allowed_letters}
-    # Sort by decreasing length so multi-character labels (e.g. "AA") match before "A".
-    sorted_letters = sorted(allowed_lookup, key=len, reverse=True)
-    pattern = r"\\b(" + "|".join(re.escape(letter) for letter in sorted_letters) + r")\\b"
-    match = re.search(pattern, decoded, flags=re.IGNORECASE)
-    if match:
-        candidate = match.group(1).upper()
-        return allowed_lookup.get(candidate, "")
-    for char in decoded:
-        letter = allowed_lookup.get(char.upper())
-        if letter:
-            return letter
-    return ""
 
 
 __all__ = [
