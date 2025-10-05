@@ -64,6 +64,7 @@ class _DummyProcessor:
     def __call__(self, *, text: str, images, return_tensors: str = "pt"):
         mapping = {
             "prompt": [0, 5],
+            "prompt|": [0, 5],
             "prompt| cat": [0, 5, 1, 2],
             "prompt| dog": [0, 5, 3, 4],
         }

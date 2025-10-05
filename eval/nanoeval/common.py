@@ -140,15 +140,33 @@ class SimpleModel:
         if not options:
             raise ValueError("Multiple-choice prompts must include at least one option")
 
-        prompt_text = self.processor.apply_chat_template(
-            list(messages), add_generation_prompt=True
+        base_messages = list(messages)
+        images_list = list(images)
+        # ``apply_chat_template`` appends closing tokens (for example
+        # ``<end_of_utterance>``) even when the assistant message is empty.  We
+        # cache the tokenised length of that "prompt + empty assistant" variant
+        # so we can later subtract it from each scored conversation and obtain
+        # the exact number of tokens contributed by the candidate option alone.
+        blank_convo = base_messages + [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "",
+                    }
+                ],
+            }
+        ]
+        blank_text = self.processor.apply_chat_template(
+            blank_convo, add_generation_prompt=False
         )
-        prompt_inputs = self.processor(
-            text=prompt_text,
-            images=list(images) if images else None,
+        blank_inputs = self.processor(
+            text=blank_text,
+            images=images_list if images_list else None,
             return_tensors="pt",
         )
-        prompt_len = prompt_inputs["input_ids"].shape[1]
+        base_len = blank_inputs["input_ids"].shape[1]
 
         scores: List[float] = []
         for candidate in options:
@@ -173,7 +191,7 @@ class SimpleModel:
             )
             convo_inputs = self.processor(
                 text=convo_text,
-                images=list(images) if images else None,
+                images=images_list if images_list else None,
                 return_tensors="pt",
             )
             inputs = {k: v.to(self.device) for k, v in convo_inputs.items()}
@@ -183,7 +201,11 @@ class SimpleModel:
             targets = input_ids[:, 1:]
             log_probs = F.log_softmax(logits, dim=-1)
             gathered = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-            option_token_count = input_ids.shape[1] - prompt_len
+            option_token_count = input_ids.shape[1] - base_len
+            if option_token_count <= 0:
+                raise RuntimeError(
+                    "Failed to isolate option tokens when ranking multimodal options"
+                )
             scores.append(gathered[0, -option_token_count:].sum().item())
 
         best_index = max(range(len(options)), key=scores.__getitem__)
