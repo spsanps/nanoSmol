@@ -8,10 +8,12 @@ around Hugging Face models used to score multiple-choice prompts.
 
 from __future__ import annotations
 
+import random
 import re
 from string import ascii_uppercase
 from typing import List, Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import (
@@ -57,8 +59,11 @@ _DTYPE_LOOKUP = {
 def set_seed(seed: int) -> None:
     """Seed all torch RNGs so greedy decoding stays deterministic."""
 
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _resolve_device(requested: str) -> str:
@@ -133,13 +138,18 @@ class SimpleModel:
                 max_new_tokens=max_new_tokens,
             )
 
-        encoded = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        encoded = self.tokenizer(prompt, return_tensors="pt")
+        prompt_len = encoded.input_ids.shape[1]
+        encoded = encoded.to(self.device)
         output_ids = self.model.generate(
             **encoded,
             do_sample=False,
             max_new_tokens=max_new_tokens,
         )
-        decoded = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        generated_tokens = output_ids[:, prompt_len:]
+        decoded = self.tokenizer.decode(
+            generated_tokens[0], skip_special_tokens=True
+        )
         return _extract_choice(decoded, allowed_letters)
 
     @torch.no_grad()
@@ -183,13 +193,18 @@ class SimpleModel:
             text=prompt,
             images=list(images) if images else None,
             return_tensors="pt",
-        ).to(self.device)
+        )
+        prompt_len = inputs["input_ids"].shape[1]
+        inputs = inputs.to(self.device)
         output_ids = self.model.generate(
             **inputs,
             do_sample=False,
             max_new_tokens=max_new_tokens,
         )
-        decoded = self.processor.batch_decode(output_ids, skip_special_tokens=True)[0]
+        generated_tokens = output_ids[:, prompt_len:]
+        decoded = self.processor.batch_decode(
+            generated_tokens, skip_special_tokens=True
+        )[0]
         return _extract_choice(decoded, allowed_letters)
 
 

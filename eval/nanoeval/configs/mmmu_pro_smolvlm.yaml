@@ -8,6 +8,7 @@ model:
   trust_remote_code: true
   attn_impl: flash_attention_2
 scoring:
+  # MMMU-Pro currently supports only greedy letter decoding.
   strategy: gen_letter
   max_new_tokens: 8
   seed: 123

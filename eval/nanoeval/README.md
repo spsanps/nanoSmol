@@ -46,6 +46,11 @@ export NANOEVAL_CONFIG=eval/nanoeval/configs/mmmu_pro_smolvlm.yaml
 python -m eval.nanoeval.run_mmmu_pro
 ```
 
+> **Note**
+> The MMMU-Pro runner currently supports only greedy letter decoding
+> (`scoring.strategy: gen_letter`).  Configs requesting `rank_ll` will raise a
+> `ValueError` so mismatched reports don't silently slip through.
+
 ## Model-centric suites
 
 When you want to reproduce a paper-style table for a single checkpoint,
