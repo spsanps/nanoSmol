@@ -1,8 +1,7 @@
 """Prompt templates shared by the NanoEval runners."""
 
 MMLU_ZERO_SHOT = """\
-You are given a multiple-choice question. Choose the correct answer from A, B, C, or D.
-Reply using a single capital letter.
+You are given a multiple-choice question. Choose the correct answer.
 
 Question:
 {question}
@@ -16,8 +15,7 @@ D. {D}
 Answer:"""
 
 HELLASWAG_ZERO_SHOT = """\
-Choose the best ending (A, B, C, or D) that completes the context.
-Reply using a single capital letter.
+Choose the ending that best completes the context.
 
 Context:
 {context}
@@ -31,8 +29,7 @@ D. {D}
 Answer:"""
 
 MMMU_VQA_ZERO_SHOT = """\
-You will see one or more images and a question with answer options.
-Reply using a single capital letter from this set: {letters}.
+You will see one or more images and a question with answer options. Select the option that best answers the question.
 
 Question:
 {question}

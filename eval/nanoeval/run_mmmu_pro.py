@@ -81,11 +81,6 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
     set_seed(config.scoring.seed)
     if not config.model.is_vlm:
         raise ValueError("MMMU-Pro requires a vision-language model")
-    if config.scoring.strategy != "gen_letter":
-        raise ValueError(
-            "MMMU-Pro currently supports only 'gen_letter' scoring; "
-            f"received {config.scoring.strategy!r}"
-        )
 
     model = SimpleModel(config.model)
     dataset = load_dataset("MMMU/MMMU_Pro", name=config.dataset.subset_name, split=config.dataset.split)
@@ -104,7 +99,6 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
             )
         letters = build_letter_choices(len(options))
         prompt = MMMU_VQA_ZERO_SHOT.format(
-            letters=", ".join(letters),
             question=example["question"],
             options_block="\n".join(
                 f"{letters[idx]}. {choice}" for idx, choice in enumerate(options)
@@ -116,17 +110,19 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
         message_content.append({"type": "text", "text": prompt})
         messages = [{"role": "user", "content": message_content}]
 
-        prediction = (
-            model.generate_letter_vlm(messages, images, letters, config.scoring.max_new_tokens)
-            or "?"
+        scoring_options = [str(choice) for choice in options]
+        predicted_index = model.rank_log_likelihood_multimodal(
+            messages, images, scoring_options
         )
+        prediction = letters[predicted_index]
         gold = str(example["answer"]).strip().upper()
         if gold not in letters:
             raise ValueError(
                 "Gold answer label not present in generated choice labels: "
                 f"gold={gold!r}, labels={letters}, id={example.get('id', '')}",
             )
-        is_correct = prediction == gold
+        gold_index = letters.index(gold)
+        is_correct = predicted_index == gold_index
         correct += int(is_correct)
         records.append(
             {
@@ -151,8 +147,7 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
             "subset_name": config.dataset.subset_name,
             "split": config.dataset.split,
             "subset_size": config.dataset.subset_size,
-            "scoring": config.scoring.strategy,
-            "max_new_tokens": config.scoring.max_new_tokens,
+            "scoring": "rank_ll",
             "seed": config.scoring.seed,
             "model_id": config.model.model_id,
         }

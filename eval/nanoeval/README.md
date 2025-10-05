@@ -46,10 +46,14 @@ export NANOEVAL_CONFIG=eval/nanoeval/configs/mmmu_pro_smolvlm.yaml
 python -m eval.nanoeval.run_mmmu_pro
 ```
 
-> **Note**
-> The MMMU-Pro runner currently supports only greedy letter decoding
-> (`scoring.strategy: gen_letter`).  Configs requesting `rank_ll` will raise a
-> `ValueError` so mismatched reports don't silently slip through.
+All three runners use log-likelihood ranking exclusively; the model scores each
+option and the highest-probability choice wins.  No parsing of generated letters
+is involved, and the only scoring parameter exposed in the YAML is the random
+seed that keeps sampling-free runs deterministic.
+
+> **Tip**
+> MMMU-Pro requires `model.is_vlm: true` so the runner can feed images through
+> the processor while computing option log-likelihoods.
 
 ## Model-centric suites
 
@@ -74,6 +78,6 @@ Each run produces three artefacts in the configured ``report`` directory:
 * ``metrics.csv`` & ``accuracy.png`` — tabular + visual view of the primary
   score.
 
-All behaviour (e.g. log-likelihood scoring, maximum new tokens, per-subject
-subsets) is driven by the YAML file so experimenting with new checkpoints or
-decoding strategies is as simple as editing the config and re-running.
+All behaviour (per-subject subsets, report destinations, seeds) is driven by the
+YAML file so experimenting with new checkpoints is as simple as editing the
+config and re-running.

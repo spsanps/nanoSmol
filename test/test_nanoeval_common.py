@@ -1,22 +1,19 @@
-"""Unit tests covering shared NanoEval helpers."""
-
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 import pytest
 
+pytest.importorskip("torch")
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import torch
-
-from eval.nanoeval.common import SimpleModel, set_seed
-from eval.nanoeval.config import MMMUProRunConfig, ModelConfig, ScoringConfig
-from eval.nanoeval.run_mmmu_pro import run
+from eval.nanoeval.common import SimpleModel, set_seed  # noqa: E402
 
 
 class _DummyEncoding(dict):
@@ -29,81 +26,98 @@ class _DummyEncoding(dict):
         return self
 
 
-class _DummyTokenizer:
-    def __init__(self, prompt_ids: list[int], vocab: dict[int, str]):
-        self.prompt_ids = prompt_ids
-        self.vocab = vocab
-        self.pad_token = None
-        self.eos_token = "<eos>"
+class _DummyTextTokenizer:
+    def __init__(self) -> None:
+        self.mapping = {
+            "prompt": [0],
+            " correct": [1, 2],
+            " wrong": [3, 4],
+        }
 
-    def __call__(self, prompt: str, return_tensors: str = "pt"):
-        return _DummyEncoding(self.prompt_ids)
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return list(self.mapping[text])
 
-    def decode(self, token_ids, skip_special_tokens: bool = True) -> str:
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.tolist()
-        return "".join(self.vocab.get(token, "") for token in token_ids)
+
+class _DummyTextModel:
+    def __call__(self, *, input_ids: torch.Tensor):
+        tokens = input_ids.tolist()[0]
+        if tokens[1] == 1:  # option "correct"
+            logits = torch.tensor(
+                [[[5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0]]],
+                dtype=torch.float32,
+            )
+        else:  # option "wrong"
+            logits = torch.tensor(
+                [[[0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0]]],
+                dtype=torch.float32,
+            )
+        return SimpleNamespace(logits=logits)
 
 
 class _DummyProcessor:
-    def __init__(self, prompt_ids: list[int], vocab: dict[int, str]):
-        self.prompt_ids = prompt_ids
-        self.vocab = vocab
-
     def apply_chat_template(self, messages, add_generation_prompt: bool = True) -> str:
-        return "dummy"
+        if add_generation_prompt:
+            return "prompt"
+        assistant = messages[-1]["content"][0]["text"]
+        return f"prompt|{assistant}"
 
     def __call__(self, *, text: str, images, return_tensors: str = "pt"):
-        return _DummyEncoding(self.prompt_ids)
-
-    def batch_decode(self, sequences, skip_special_tokens: bool = True):
-        results = []
-        for seq in sequences:
-            if isinstance(seq, torch.Tensor):
-                seq = seq.tolist()
-            results.append("".join(self.vocab.get(token, "") for token in seq))
-        return results
+        mapping = {
+            "prompt": [0, 5],
+            "prompt|": [0, 5],
+            "prompt| cat": [0, 5, 1, 2],
+            "prompt| dog": [0, 5, 3, 4],
+        }
+        return _DummyEncoding(mapping[text])
 
 
-class _DummyModel:
-    def __init__(self, output_ids: list[int]):
-        self.output = torch.tensor([output_ids], dtype=torch.long)
+class _DummyVLMModel:
+    def __call__(self, *, input_ids: torch.Tensor):
+        tokens = input_ids.tolist()[0]
+        if tokens[2] == 1:  # option "cat"
+            logits = torch.tensor(
+                [[[5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0]]],
+                dtype=torch.float32,
+            )
+        else:  # option "dog"
+            logits = torch.tensor(
+                [[[0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0]]],
+                dtype=torch.float32,
+            )
+        return SimpleNamespace(logits=logits)
 
-    def generate(self, **_: dict):
-        return self.output
 
-
-def _build_simple_model_for_text() -> SimpleModel:
+def _build_simple_text_model() -> SimpleModel:
     instance = SimpleModel.__new__(SimpleModel)
-    vocab = {10: "A", 11: ". ", 12: "Option ", 20: "C"}
     instance.processor = None
-    instance.tokenizer = _DummyTokenizer([10, 11, 12], vocab)
-    instance.model = _DummyModel([10, 11, 12, 20])
+    instance.tokenizer = _DummyTextTokenizer()
+    instance.model = _DummyTextModel()
     instance.device = "cpu"
     return instance
 
 
-def _build_simple_model_for_vlm() -> SimpleModel:
+def _build_simple_vlm_model() -> SimpleModel:
     instance = SimpleModel.__new__(SimpleModel)
-    vocab = {30: "A", 31: ". ", 32: "Picture ", 40: "D"}
-    instance.processor = _DummyProcessor([30, 31, 32], vocab)
+    instance.processor = _DummyProcessor()
     instance.tokenizer = None
-    instance.model = _DummyModel([30, 31, 32, 40])
+    instance.model = _DummyVLMModel()
     instance.device = "cpu"
     return instance
 
 
-def test_generate_letter_text_ignores_prompt_letters():
-    model = _build_simple_model_for_text()
-    result = model.generate_letter_text("prompt", ["A", "B", "C"], max_new_tokens=1)
-    assert result == "C"
+def test_rank_log_likelihood_prefers_high_prob_text_option():
+    model = _build_simple_text_model()
+    result = model.rank_log_likelihood("prompt", ["correct", "wrong"])
+    assert result == 0
 
 
-def test_generate_letter_vlm_ignores_prompt_letters():
-    model = _build_simple_model_for_vlm()
+def test_rank_log_likelihood_multimodal_prefers_high_prob_option():
+    model = _build_simple_vlm_model()
     messages = [{"role": "user", "content": [{"type": "text", "text": "prompt"}]}]
-    result = model.generate_letter_vlm(messages, images=(), allowed_letters=["A", "B", "C", "D"], max_new_tokens=1)
-    assert result == "D"
+    result = model.rank_log_likelihood_multimodal(
+        messages, images=(), options=["cat", "dog"]
+    )
+    assert result == 0
 
 
 def test_set_seed_cpu_only(monkeypatch):
@@ -119,14 +133,3 @@ def test_set_seed_cpu_only(monkeypatch):
 
     set_seed(123)
     assert calls["cuda"] is False
-
-
-def test_mmmu_pro_rejects_rank_ll_strategy(monkeypatch):
-    monkeypatch.setattr("eval.nanoeval.run_mmmu_pro.load_dataset", lambda *args, **kwargs: None)
-    config = MMMUProRunConfig(
-        task="mmmu_pro",
-        model=ModelConfig(model_id="dummy", is_vlm=True),
-        scoring=ScoringConfig(strategy="rank_ll"),
-    )
-    with pytest.raises(ValueError):
-        run(config)

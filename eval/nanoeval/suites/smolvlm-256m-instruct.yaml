@@ -12,22 +12,10 @@ tasks:
   - task: mmlu
     dataset:
       split: test
-    scoring:
-      strategy: gen_letter
-      max_new_tokens: 8
-      seed: 123
   - task: hellaswag
     dataset:
       split: validation
-    scoring:
-      strategy: gen_letter
-      max_new_tokens: 8
-      seed: 123
   - task: mmmu_pro
     dataset:
       subset_name: "standard (10 options)"
       split: test
-    scoring:
-      strategy: gen_letter
-      max_new_tokens: 16
-      seed: 123
