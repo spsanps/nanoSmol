@@ -30,8 +30,8 @@ class _DummyTextTokenizer:
     def __init__(self) -> None:
         self.mapping = {
             "prompt": [0],
-            " A. correct": [1, 2],
-            " B. wrong": [3, 4],
+            " correct": [1, 2],
+            " wrong": [3, 4],
         }
 
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
@@ -41,12 +41,12 @@ class _DummyTextTokenizer:
 class _DummyTextModel:
     def __call__(self, *, input_ids: torch.Tensor):
         tokens = input_ids.tolist()[0]
-        if tokens[1] == 1:  # option "A. correct"
+        if tokens[1] == 1:  # option "correct"
             logits = torch.tensor(
                 [[[5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0]]],
                 dtype=torch.float32,
             )
-        else:  # option "B. wrong"
+        else:  # option "wrong"
             logits = torch.tensor(
                 [[[0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0]]],
                 dtype=torch.float32,
@@ -64,8 +64,8 @@ class _DummyProcessor:
     def __call__(self, *, text: str, images, return_tensors: str = "pt"):
         mapping = {
             "prompt": [0, 5],
-            "prompt| A. cat": [0, 5, 1, 2],
-            "prompt| B. dog": [0, 5, 3, 4],
+            "prompt| cat": [0, 5, 1, 2],
+            "prompt| dog": [0, 5, 3, 4],
         }
         return _DummyEncoding(mapping[text])
 
@@ -73,12 +73,12 @@ class _DummyProcessor:
 class _DummyVLMModel:
     def __call__(self, *, input_ids: torch.Tensor):
         tokens = input_ids.tolist()[0]
-        if tokens[2] == 1:  # option "A. cat"
+        if tokens[2] == 1:  # option "cat"
             logits = torch.tensor(
                 [[[5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0]]],
                 dtype=torch.float32,
             )
-        else:  # option "B. dog"
+        else:  # option "dog"
             logits = torch.tensor(
                 [[[0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0]]],
                 dtype=torch.float32,
@@ -106,7 +106,7 @@ def _build_simple_vlm_model() -> SimpleModel:
 
 def test_rank_log_likelihood_prefers_high_prob_text_option():
     model = _build_simple_text_model()
-    result = model.rank_log_likelihood("prompt", ["A. correct", "B. wrong"])
+    result = model.rank_log_likelihood("prompt", ["correct", "wrong"])
     assert result == 0
 
 
@@ -114,7 +114,7 @@ def test_rank_log_likelihood_multimodal_prefers_high_prob_option():
     model = _build_simple_vlm_model()
     messages = [{"role": "user", "content": [{"type": "text", "text": "prompt"}]}]
     result = model.rank_log_likelihood_multimodal(
-        messages, images=(), options=["A. cat", "B. dog"]
+        messages, images=(), options=["cat", "dog"]
     )
     assert result == 0
 

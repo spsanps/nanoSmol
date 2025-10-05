@@ -110,9 +110,7 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
         message_content.append({"type": "text", "text": prompt})
         messages = [{"role": "user", "content": message_content}]
 
-        scoring_options = [
-            f"{letters[idx]}. {choice}" for idx, choice in enumerate(options)
-        ]
+        scoring_options = [str(choice) for choice in options]
         predicted_index = model.rank_log_likelihood_multimodal(
             messages, images, scoring_options
         )

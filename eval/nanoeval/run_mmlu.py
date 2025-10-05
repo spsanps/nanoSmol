@@ -133,9 +133,7 @@ def run(config: MMLURunConfig) -> Dict[str, object]:
             )
             gold_index = int(example["answer"])
             gold_letter = LETTER4[gold_index]
-            scoring_options = [
-                f"{LETTER4[idx]}. {choice}" for idx, choice in enumerate(example["choices"])
-            ]
+            scoring_options = [str(choice) for choice in example["choices"]]
             choice_index = model.rank_log_likelihood(prompt, scoring_options)
             predicted = LETTER4[choice_index]
             is_correct = predicted == gold_letter

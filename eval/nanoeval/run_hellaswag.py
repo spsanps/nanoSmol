@@ -39,9 +39,7 @@ def run(config: HellaSwagRunConfig) -> Dict[str, object]:
         )
         gold_index = int(example["label"])
 
-        scoring_options = [
-            f"{LETTER4[idx]}. {ending}" for idx, ending in enumerate(example["endings"])
-        ]
+        scoring_options = [str(ending) for ending in example["endings"]]
         predicted_index = model.rank_log_likelihood(prompt, scoring_options)
 
         is_correct = predicted_index == gold_index
