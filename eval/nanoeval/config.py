@@ -136,7 +136,10 @@ def build_model_config(data: Mapping[str, Any]) -> ModelConfig:
 def _build_scoring_config(data: Mapping[str, Any] | None) -> ScoringConfig:
     if not data:
         return ScoringConfig()
-    return ScoringConfig(seed=int(data.get("seed", 123)))
+    return ScoringConfig(
+        seed=int(data.get("seed", 123)),
+        normalize_by_length=bool(data.get("normalize_by_length", False))
+    )
 
 
 def _build_mmlu_dataset(data: Mapping[str, Any] | None) -> MMLUDatasetConfig:
