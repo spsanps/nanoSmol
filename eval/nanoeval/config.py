@@ -25,6 +25,7 @@ class ScoringConfig:
     """Options controlling deterministic scoring."""
 
     seed: int = 123
+    normalize_by_length: bool = False
 
 
 @dataclass

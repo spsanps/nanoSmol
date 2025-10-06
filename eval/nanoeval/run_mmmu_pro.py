@@ -112,7 +112,7 @@ def run(config: MMMUProRunConfig) -> Dict[str, object]:
 
         scoring_options = [str(choice) for choice in options]
         predicted_index = model.rank_log_likelihood_multimodal(
-            messages, images, scoring_options
+            messages, images, scoring_options, normalize=config.scoring.normalize_by_length
         )
         prediction = letters[predicted_index]
         gold = str(example["answer"]).strip().upper()

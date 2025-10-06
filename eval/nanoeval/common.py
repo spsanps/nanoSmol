@@ -107,11 +107,17 @@ class SimpleModel:
 
     # --------------------------------------------------------------------- text
     @torch.no_grad()
-    def rank_log_likelihood(self, prompt: str, options: Sequence[str]) -> int:
-        """Return the index of the option with the highest summed log-prob."""
+    def rank_log_likelihood(self, prompt: str, options: Sequence[str], normalize: bool = False) -> int:
+        """Return the index of the option with the highest summed log-prob.
+
+        Args:
+            prompt: The prompt/context to score against
+            options: List of option texts to rank
+            normalize: If True, divide log-prob sum by sequence length (lighteval's loglikelihood_acc_norm)
+        """
 
         if self.processor is None:
-            return self._rank_text(prompt, options)
+            return self._rank_text(prompt, options, normalize=normalize)
 
         messages = [
             {
@@ -124,7 +130,7 @@ class SimpleModel:
                 ],
             }
         ]
-        return self.rank_log_likelihood_multimodal(messages, (), options)
+        return self.rank_log_likelihood_multimodal(messages, (), options, normalize=normalize)
 
     @torch.no_grad()
     def rank_log_likelihood_multimodal(
@@ -132,8 +138,16 @@ class SimpleModel:
         messages: Sequence[dict],
         images: Sequence[object],
         options: Sequence[str],
+        normalize: bool = False,
     ) -> int:
-        """Rank ``options`` given multimodal ``messages`` and ``images``."""
+        """Rank ``options`` given multimodal ``messages`` and ``images``.
+
+        Args:
+            messages: Chat-style messages
+            images: Image inputs for VLM
+            options: List of option texts to rank
+            normalize: If True, divide log-prob sum by sequence length
+        """
 
         if self.processor is None:
             raise RuntimeError("Text models must call rank_log_likelihood()")
@@ -206,12 +220,15 @@ class SimpleModel:
                 raise RuntimeError(
                     "Failed to isolate option tokens when ranking multimodal options"
                 )
-            scores.append(gathered[0, -option_token_count:].sum().item())
+            raw_score = gathered[0, -option_token_count:].sum().item()
+            # Apply length normalization if requested
+            score = raw_score / option_token_count if normalize else raw_score
+            scores.append(score)
 
         best_index = max(range(len(options)), key=scores.__getitem__)
         return int(best_index)
 
-    def _rank_text(self, prompt: str, options: Sequence[str]) -> int:
+    def _rank_text(self, prompt: str, options: Sequence[str], normalize: bool = False) -> int:
         if not options:
             raise ValueError("Multiple-choice prompts must include at least one option")
         scores: List[float] = []
@@ -226,7 +243,10 @@ class SimpleModel:
             targets = input_ids[:, 1:]
             log_probs = F.log_softmax(logits, dim=-1)
             gathered = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-            scores.append(gathered[0, -len(option_ids) :].sum().item())
+            raw_score = gathered[0, -len(option_ids) :].sum().item()
+            # Apply length normalization if requested (like lighteval's loglikelihood_acc_norm)
+            score = raw_score / len(option_ids) if normalize and len(option_ids) > 0 else raw_score
+            scores.append(score)
         best_index = max(range(len(options)), key=scores.__getitem__)
         return int(best_index)
 
