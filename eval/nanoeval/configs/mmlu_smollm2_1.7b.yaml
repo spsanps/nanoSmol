@@ -1,0 +1,30 @@
+# MMLU evaluation with SmolLM2-1.7B-Instruct (larger model for comparison)
+task: mmlu
+model:
+  model_id: HuggingFaceTB/SmolLM2-1.7B-Instruct
+  is_vlm: false
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+  attn_impl: flash_attention_2
+scoring:
+  seed: 123
+  normalize_by_length: false  # MMLU uses unnormalized scoring
+report:
+  output_dir: artifacts/nanoeval/mmlu/smollm2-1.7b
+  summary_filename: summary.json
+  predictions_filename: predictions.jsonl
+  table_filename: metrics.csv
+  plot_filename: accuracy.png
+  save_predictions: true
+  save_table: true
+  save_plot: true
+# Start with a small subset for testing (4 subjects, 10 examples each)
+dataset:
+  split: test
+  subjects:
+    - high_school_mathematics
+    - high_school_physics
+    - high_school_chemistry
+    - high_school_biology
+  subset_size: 10

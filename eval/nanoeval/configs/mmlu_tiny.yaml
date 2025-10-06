@@ -9,6 +9,7 @@ model:
   attn_impl: null
 scoring:
   seed: 7
+  normalize_by_length: false  # MMLU uses instruction format, no normalization needed
 report:
   output_dir: artifacts/nanoeval/mmlu/tiny-gpt2
   summary_filename: summary.json

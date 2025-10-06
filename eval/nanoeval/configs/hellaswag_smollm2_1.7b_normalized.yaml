@@ -1,7 +1,8 @@
-# HellaSwag zero-shot evaluation using the text-only path of SmolVLM.
+# HellaSwag evaluation with SmolLM2-1.7B-Instruct
+# Testing with length-normalized scoring
 task: hellaswag
 model:
-  model_id: HuggingFaceTB/SmolVLM-256M-Instruct
+  model_id: HuggingFaceTB/SmolLM2-1.7B-Instruct
   is_vlm: false
   dtype: bfloat16
   device: cuda
@@ -9,9 +10,9 @@ model:
   attn_impl: flash_attention_2
 scoring:
   seed: 123
-  normalize_by_length: true  # HellaSwag requires length normalization (lighteval standard)
+  # TODO: Add normalize_by_length parameter
 report:
-  output_dir: artifacts/nanoeval/hellaswag/smolvlm-256m
+  output_dir: artifacts/nanoeval/hellaswag/smollm2-1.7b-normalized
   summary_filename: summary.json
   predictions_filename: predictions.jsonl
   table_filename: metrics.csv
@@ -21,4 +22,4 @@ report:
   save_plot: true
 dataset:
   split: validation
-  subset_size: null
+  subset_size: 100

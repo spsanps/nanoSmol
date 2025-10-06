@@ -30,17 +30,13 @@ def run(config: HellaSwagRunConfig) -> Dict[str, object]:
     rows: List[Dict[str, object]] = []
 
     for index, example in enumerate(tqdm(dataset, desc=f"hellaswag:{config.dataset.split}")):
-        prompt = HELLASWAG_ZERO_SHOT.format(
-            context=example["ctx"],
-            A=example["endings"][0],
-            B=example["endings"][1],
-            C=example["endings"][2],
-            D=example["endings"][3],
-        )
+        # Use direct continuation format (like lighteval) - just context, no instruction
+        ctx = example["ctx"]
         gold_index = int(example["label"])
 
         scoring_options = [str(ending) for ending in example["endings"]]
-        predicted_index = model.rank_log_likelihood(prompt, scoring_options)
+        # Score by computing log-likelihood of ctx + " " + ending for each option
+        predicted_index = model.rank_log_likelihood(ctx, scoring_options, normalize=config.scoring.normalize_by_length)
 
         is_correct = predicted_index == gold_index
         correct += int(is_correct)
