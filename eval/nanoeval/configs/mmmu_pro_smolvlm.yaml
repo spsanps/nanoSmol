@@ -9,6 +9,7 @@ model:
   attn_impl: flash_attention_2
 scoring:
   seed: 123
+  normalize_by_length: false  # MMMU-Pro uses instruction format
 report:
   output_dir: artifacts/nanoeval/mmmu_pro/smolvlm-256m
   summary_filename: summary.json

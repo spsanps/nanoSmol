@@ -9,6 +9,7 @@ model:
   attn_impl: flash_attention_2
 scoring:
   seed: 123
+  normalize_by_length: true  # HellaSwag requires length normalization (lighteval standard)
 report:
   output_dir: artifacts/nanoeval/hellaswag/smolvlm-256m
   summary_filename: summary.json
