@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import random
 from string import ascii_uppercase
-from typing import List, Sequence
+from typing import Any, List, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -106,6 +106,113 @@ class SimpleModel:
         self.model.eval()
 
     # --------------------------------------------------------------------- text
+    @torch.no_grad()
+    def generate_text(
+        self,
+        prompt: str | Sequence[Mapping[str, Any]],
+        *,
+        images: Sequence[object] | None = None,
+        max_new_tokens: int = 32,
+    ) -> str:
+        """Greedily decode a response for ``prompt``.
+
+        ``SimpleModel`` instances abstract over text-only causal LMs and
+        multimodal chat-style models.  ``generate_text`` accepts either a raw
+        string prompt (for text models) or a chat-style conversation
+        (``[{"role": ..., "content": ...}, ...]``) for VLMs.  The method always
+        performs deterministic greedy decoding so repeated calls with the same
+        seed produce identical outputs.
+        """
+
+        if max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be at least 1")
+
+        tokenizer = self.tokenizer
+        if self.processor is None:
+            if not isinstance(prompt, str):
+                raise TypeError("Text models expect `prompt` to be a string")
+            # ``transformers`` tokenizers expose both ``__call__`` and ``encode``.
+            # ``SimpleModel`` supports either to keep dummy unit-test tokenizers
+            # lightweight.
+            tokenized_inputs: Mapping[str, torch.Tensor]
+            try:
+                tokenized_inputs = self.tokenizer(  # type: ignore[call-arg]
+                    prompt, return_tensors="pt"
+                )
+            except TypeError:
+                prompt_ids = self.tokenizer.encode(  # type: ignore[call-arg]
+                    prompt, add_special_tokens=False
+                )
+                tensor = torch.tensor([prompt_ids], dtype=torch.long)
+                tokenized_inputs = {
+                    "input_ids": tensor,
+                    "attention_mask": torch.ones_like(tensor),
+                }
+            inputs = {
+                name: value.to(self.device) if hasattr(value, "to") else value
+                for name, value in tokenized_inputs.items()
+            }
+        else:
+            images_list = list(images) if images is not None else []
+            if isinstance(prompt, str):
+                content: List[Mapping[str, Any]] = []
+                for _ in images_list:
+                    content.append({"type": "image"})
+                content.append({"type": "text", "text": prompt})
+                messages = [{"role": "user", "content": content}]
+            else:
+                messages = list(prompt)
+            convo_text = self.processor.apply_chat_template(  # type: ignore[arg-type]
+                messages, add_generation_prompt=True
+            )
+            batch_encoding = self.processor(  # type: ignore[call-arg]
+                text=convo_text,
+                images=images_list if images_list else None,
+                return_tensors="pt",
+            )
+            inputs = {
+                name: value.to(self.device) if hasattr(value, "to") else value
+                for name, value in batch_encoding.items()
+            }
+            tokenizer = getattr(self.processor, "tokenizer", tokenizer)
+
+        pad_token_id = None
+        if hasattr(self.model, "config"):
+            pad_token_id = getattr(self.model.config, "pad_token_id", None)
+            if pad_token_id is None:
+                pad_token_id = getattr(self.model.config, "eos_token_id", None)
+        if pad_token_id is None and tokenizer is not None:
+            pad_token_id = getattr(tokenizer, "pad_token_id", None)
+            if pad_token_id is None:
+                pad_token_id = getattr(tokenizer, "eos_token_id", None)
+
+        generated_ids = self.model.generate(  # type: ignore[call-arg]
+            **inputs,
+            max_new_tokens=int(max_new_tokens),
+            do_sample=False,
+            pad_token_id=pad_token_id,
+        )
+
+        if isinstance(generated_ids, torch.Tensor):
+            full_sequence = generated_ids
+        else:
+            full_sequence = torch.tensor(generated_ids, device=self.device)
+
+        input_length = inputs["input_ids"].shape[1]
+        new_token_ids = full_sequence[0, input_length:]
+        new_token_list = new_token_ids.tolist()
+
+        if tokenizer is not None and hasattr(tokenizer, "decode"):
+            text = tokenizer.decode(new_token_list, skip_special_tokens=True)  # type: ignore[arg-type]
+        elif hasattr(self.processor, "decode"):
+            text = self.processor.decode(new_token_list, skip_special_tokens=True)  # type: ignore[arg-type]
+        elif hasattr(self.processor, "batch_decode"):
+            text = self.processor.batch_decode([new_token_list], skip_special_tokens=True)[0]  # type: ignore[arg-type]
+        else:
+            raise RuntimeError("Could not find a decode method for generated tokens")
+
+        return text.strip()
+
     @torch.no_grad()
     def rank_log_likelihood(self, prompt: str, options: Sequence[str], normalize: bool = False) -> int:
         """Return the index of the option with the highest summed log-prob.

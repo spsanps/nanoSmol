@@ -1,0 +1,26 @@
+# MME yes/no evaluation with SmolVLM.
+task: mme
+model:
+  model_id: HuggingFaceTB/SmolVLM-256M-Instruct
+  is_vlm: true
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+  attn_impl: flash_attention_2
+scoring:
+  seed: 123
+  normalize_by_length: false
+generation:
+  max_new_tokens: 16
+report:
+  output_dir: artifacts/nanoeval/mme/smolvlm-256m
+  summary_filename: summary.json
+  predictions_filename: predictions.jsonl
+  table_filename: metrics.csv
+  plot_filename: accuracy.png
+  save_predictions: true
+  save_table: true
+  save_plot: true
+dataset:
+  split: test
+  subset_size: null

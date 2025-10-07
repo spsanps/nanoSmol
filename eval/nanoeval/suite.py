@@ -75,10 +75,18 @@ def _run_task(task: TaskConfig) -> Dict[str, object]:
         from .run_hellaswag import run as run_hellaswag
 
         summary = run_hellaswag(task)  # type: ignore[arg-type]
-    else:
+    elif task.task == "mmmu_pro":
         from .run_mmmu_pro import run as run_mmmu_pro
 
         summary = run_mmmu_pro(task)  # type: ignore[arg-type]
+    elif task.task == "textvqa":
+        from .run_textvqa import run as run_textvqa
+
+        summary = run_textvqa(task)  # type: ignore[arg-type]
+    else:
+        from .run_mme import run as run_mme
+
+        summary = run_mme(task)  # type: ignore[arg-type]
     return {"task": task.task, **summary}
 
 

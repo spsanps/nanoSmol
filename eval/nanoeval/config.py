@@ -65,6 +65,23 @@ class MMMUProDatasetConfig:
 
 
 @dataclass
+class TextVQADatasetConfig:
+    split: str = "validation"
+    subset_size: int | None = None
+
+
+@dataclass
+class MMEDatasetConfig:
+    split: str = "test"
+    subset_size: int | None = None
+
+
+@dataclass
+class GenerationConfig:
+    max_new_tokens: int = 32
+
+
+@dataclass
 class MMLURunConfig:
     task: Literal["mmlu"]
     model: ModelConfig
@@ -97,7 +114,31 @@ class MMMUProRunConfig:
     )
 
 
-TaskConfig = MMLURunConfig | HellaSwagRunConfig | MMMUProRunConfig
+@dataclass
+class TextVQARunConfig:
+    task: Literal["textvqa"]
+    model: ModelConfig
+    dataset: TextVQADatasetConfig = field(default_factory=TextVQADatasetConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+    report: ReportConfig = field(
+        default_factory=lambda: ReportConfig(Path("artifacts/nanoeval/textvqa"))
+    )
+
+
+@dataclass
+class MMERunConfig:
+    task: Literal["mme"]
+    model: ModelConfig
+    dataset: MMEDatasetConfig = field(default_factory=MMEDatasetConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+    report: ReportConfig = field(
+        default_factory=lambda: ReportConfig(Path("artifacts/nanoeval/mme"))
+    )
+
+
+TaskConfig = MMLURunConfig | HellaSwagRunConfig | MMMUProRunConfig | TextVQARunConfig | MMERunConfig
 
 
 def _ensure_report_config(
@@ -178,6 +219,32 @@ def _build_mmmu_dataset(data: Mapping[str, Any] | None) -> MMMUProDatasetConfig:
     )
 
 
+def _build_textvqa_dataset(data: Mapping[str, Any] | None) -> TextVQADatasetConfig:
+    if not data:
+        return TextVQADatasetConfig()
+    subset_raw = data.get("subset_size")
+    return TextVQADatasetConfig(
+        split=str(data.get("split", "validation")),
+        subset_size=(int(subset_raw) if subset_raw is not None else None),
+    )
+
+
+def _build_mme_dataset(data: Mapping[str, Any] | None) -> MMEDatasetConfig:
+    if not data:
+        return MMEDatasetConfig()
+    subset_raw = data.get("subset_size")
+    return MMEDatasetConfig(
+        split=str(data.get("split", "test")),
+        subset_size=(int(subset_raw) if subset_raw is not None else None),
+    )
+
+
+def _build_generation_config(data: Mapping[str, Any] | None) -> GenerationConfig:
+    if not data:
+        return GenerationConfig()
+    return GenerationConfig(max_new_tokens=int(data.get("max_new_tokens", 32)))
+
+
 def load_task_config(path: Path) -> TaskConfig:
     """Parse ``path`` into the strongly-typed configuration objects."""
 
@@ -185,8 +252,10 @@ def load_task_config(path: Path) -> TaskConfig:
         payload: Mapping[str, Any] = yaml.safe_load(handle)
 
     task_type = payload.get("task")
-    if task_type not in {"mmlu", "hellaswag", "mmmu_pro"}:
-        raise ValueError("Config must set task to 'mmlu', 'hellaswag', or 'mmmu_pro'")
+    if task_type not in {"mmlu", "hellaswag", "mmmu_pro", "textvqa", "mme"}:
+        raise ValueError(
+            "Config must set task to 'mmlu', 'hellaswag', 'mmmu_pro', 'textvqa', or 'mme'"
+        )
 
     return build_task_config(payload)
 
@@ -204,8 +273,10 @@ def build_task_config(
     """
 
     task_type = payload.get("task")
-    if task_type not in {"mmlu", "hellaswag", "mmmu_pro"}:
-        raise ValueError("Config must set task to 'mmlu', 'hellaswag', or 'mmmu_pro'")
+    if task_type not in {"mmlu", "hellaswag", "mmmu_pro", "textvqa", "mme"}:
+        raise ValueError(
+            "Config must set task to 'mmlu', 'hellaswag', 'mmmu_pro', 'textvqa', or 'mme'"
+        )
 
     model_payload = payload.get("model")
     if model_payload is not None:
@@ -226,8 +297,32 @@ def build_task_config(
         return HellaSwagRunConfig(
             task="hellaswag", model=model, dataset=dataset, scoring=scoring, report=report
         )
-    dataset = _build_mmmu_dataset(payload.get("dataset"))
-    return MMMUProRunConfig(task="mmmu_pro", model=model, dataset=dataset, scoring=scoring, report=report)
+    if task_type == "mmmu_pro":
+        dataset = _build_mmmu_dataset(payload.get("dataset"))
+        return MMMUProRunConfig(
+            task="mmmu_pro", model=model, dataset=dataset, scoring=scoring, report=report
+        )
+    if task_type == "textvqa":
+        dataset = _build_textvqa_dataset(payload.get("dataset"))
+        generation = _build_generation_config(payload.get("generation"))
+        return TextVQARunConfig(
+            task="textvqa",
+            model=model,
+            dataset=dataset,
+            scoring=scoring,
+            generation=generation,
+            report=report,
+        )
+    dataset = _build_mme_dataset(payload.get("dataset"))
+    generation = _build_generation_config(payload.get("generation"))
+    return MMERunConfig(
+        task="mme",
+        model=model,
+        dataset=dataset,
+        scoring=scoring,
+        generation=generation,
+        report=report,
+    )
 
 
 __all__ = [
@@ -237,9 +332,14 @@ __all__ = [
     "MMLUDatasetConfig",
     "HellaSwagDatasetConfig",
     "MMMUProDatasetConfig",
+    "TextVQADatasetConfig",
+    "MMEDatasetConfig",
+    "GenerationConfig",
     "MMLURunConfig",
     "HellaSwagRunConfig",
     "MMMUProRunConfig",
+    "TextVQARunConfig",
+    "MMERunConfig",
     "TaskConfig",
     "load_task_config",
     "build_model_config",
