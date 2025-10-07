@@ -52,12 +52,8 @@ def _score_prediction(prediction: str, answers: Sequence[str]) -> float:
         return 0.0
     normalized_prediction = _normalize_answer(prediction)
     normalized_answers = [_normalize_answer(answer) for answer in answers]
-    per_answer_scores: List[float] = []
-    for index in range(len(normalized_answers)):
-        others = normalized_answers[:index] + normalized_answers[index + 1 :]
-        matches = sum(other == normalized_prediction for other in others)
-        per_answer_scores.append(min(matches / 3.0, 1.0))
-    return sum(per_answer_scores) / len(per_answer_scores)
+    matches = sum(answer == normalized_prediction for answer in normalized_answers)
+    return min(matches / 3.0, 1.0)
 
 
 def _format_prompt(question: str) -> str:

@@ -21,7 +21,15 @@ def test_normalize_answer_strips_articles_and_punctuation():
 def test_score_prediction_matches_official_rule():
     answers = ["yes"] * 7 + ["no"] * 3
     assert pytest.approx(_score_prediction("Yes", answers), rel=1e-6) == 1.0
-    assert pytest.approx(_score_prediction("no", answers), rel=1e-6) == pytest.approx(0.9, rel=1e-6)
+    assert pytest.approx(_score_prediction("no", answers), rel=1e-6) == 1.0
+
+
+def test_score_prediction_returns_thirds_for_partial_agreement():
+    answers = ["green"] * 7 + ["blue"] * 2 + ["red"]
+    assert pytest.approx(_score_prediction("green", answers), rel=1e-6) == 1.0
+    assert pytest.approx(_score_prediction("blue", answers), rel=1e-6) == pytest.approx(2 / 3, rel=1e-6)
+    assert pytest.approx(_score_prediction("red", answers), rel=1e-6) == pytest.approx(1 / 3, rel=1e-6)
+    assert pytest.approx(_score_prediction("yellow", answers), rel=1e-6) == 0.0
 
 
 def test_coerce_answers_handles_dict_entries():
