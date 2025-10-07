@@ -72,13 +72,21 @@ class _DummyTextModel:
 
 
 class _DummyProcessor:
+    def __init__(self) -> None:
+        self.last_messages = None
+        self.last_add_generation_prompt = None
+        self.last_images = None
+
     def apply_chat_template(self, messages, add_generation_prompt: bool = True) -> str:
+        self.last_messages = messages
+        self.last_add_generation_prompt = add_generation_prompt
         if add_generation_prompt:
             return "prompt"
         assistant = messages[-1]["content"][0]["text"]
         return f"prompt|{assistant}"
 
     def __call__(self, *, text: str, images, return_tensors: str = "pt"):
+        self.last_images = images
         mapping = {
             "prompt": [0, 5],
             "prompt|": [0, 5],
@@ -160,8 +168,14 @@ def test_generate_text_for_text_model_uses_greedy_suffix():
 
 def test_generate_text_for_vlm_accepts_string_prompt():
     model = _build_simple_vlm_model()
-    result = model.generate_text("prompt", images=[object()], max_new_tokens=1)
+    dummy_image = object()
+    result = model.generate_text("prompt", images=[dummy_image], max_new_tokens=1)
     assert result == "c"
+    assert model.processor.last_images == [dummy_image]
+    assert model.processor.last_messages is not None
+    content = model.processor.last_messages[0]["content"]
+    image_placeholders = [item for item in content if item.get("type") == "image"]
+    assert len(image_placeholders) == 1
 
 
 def test_set_seed_cpu_only(monkeypatch):

@@ -155,17 +155,11 @@ class SimpleModel:
         else:
             images_list = list(images) if images is not None else []
             if isinstance(prompt, str):
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt,
-                            }
-                        ],
-                    }
-                ]
+                content: List[Mapping[str, Any]] = []
+                for _ in images_list:
+                    content.append({"type": "image"})
+                content.append({"type": "text", "text": prompt})
+                messages = [{"role": "user", "content": content}]
             else:
                 messages = list(prompt)
             convo_text = self.processor.apply_chat_template(  # type: ignore[arg-type]
