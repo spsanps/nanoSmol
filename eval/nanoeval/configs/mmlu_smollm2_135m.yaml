@@ -1,0 +1,29 @@
+# MMLU evaluation with SmolLM2-135M-Instruct (tiny model for baseline)
+task: mmlu
+model:
+  model_id: HuggingFaceTB/SmolLM2-135M-Instruct
+  is_vlm: false
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+  attn_impl: flash_attention_2
+scoring:
+  seed: 123
+  normalize_by_length: false  # MMLU uses instruction format, no normalization needed
+report:
+  output_dir: artifacts/nanoeval/mmlu/smollm2-135m
+  summary_filename: summary.json
+  predictions_filename: predictions.jsonl
+  table_filename: metrics.csv
+  plot_filename: accuracy.png
+  save_predictions: true
+  save_table: true
+  save_plot: true
+dataset:
+  split: test
+  subjects:
+    - high_school_mathematics
+    - high_school_physics
+    - high_school_chemistry
+    - high_school_biology
+  subset_size: 10

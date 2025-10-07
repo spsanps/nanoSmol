@@ -1,0 +1,24 @@
+# HellaSwag evaluation with SmolLM2-135M-Instruct (tiny model for baseline)
+task: hellaswag
+model:
+  model_id: HuggingFaceTB/SmolLM2-135M-Instruct
+  is_vlm: false
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+  attn_impl: flash_attention_2
+scoring:
+  seed: 123
+  normalize_by_length: true  # Use length normalization for HellaSwag (like lighteval)
+report:
+  output_dir: artifacts/nanoeval/hellaswag/smollm2-135m
+  summary_filename: summary.json
+  predictions_filename: predictions.jsonl
+  table_filename: metrics.csv
+  plot_filename: accuracy.png
+  save_predictions: true
+  save_table: true
+  save_plot: true
+dataset:
+  split: validation
+  subset_size: 100
