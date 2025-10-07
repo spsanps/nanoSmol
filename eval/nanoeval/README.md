@@ -23,6 +23,8 @@ prompts.py      # short zero-shot prompt templates
 run_mmlu.py     # MMLU macro-accuracy loop
 run_hellaswag.py# HellaSwag accuracy loop
 run_mmmu_pro.py # MMMU-Pro multimodal accuracy loop
+run_textvqa.py  # TextVQA short-answer accuracy with VQA scoring
+run_mme.py      # MME yes/no accuracy with per-category breakdown
 configs/        # example YAML configurations (copy + customise)
 ```
 
@@ -44,12 +46,20 @@ python -m eval.nanoeval.run_hellaswag
 
 export NANOEVAL_CONFIG=eval/nanoeval/configs/mmmu_pro_smolvlm.yaml
 python -m eval.nanoeval.run_mmmu_pro
+
+export NANOEVAL_CONFIG=eval/nanoeval/configs/textvqa_smolvlm.yaml
+python -m eval.nanoeval.run_textvqa
+
+export NANOEVAL_CONFIG=eval/nanoeval/configs/mme_smolvlm.yaml
+python -m eval.nanoeval.run_mme
 ```
 
-All three runners use log-likelihood ranking exclusively; the model scores each
-option and the highest-probability choice wins.  No parsing of generated letters
-is involved, and the only scoring parameter exposed in the YAML is the random
-seed that keeps sampling-free runs deterministic.
+The multiple-choice tasks (MMLU, HellaSwag, MMMU-Pro) use log-likelihood
+ranking exclusively; the model scores each option and the highest-probability
+choice wins.  TextVQA and MME rely on deterministic greedy generation via
+``SimpleModel.generate_text`` so that repeated runs with the same seed stay
+reproducible.  All tasks surface the random seed in the YAML so you can keep
+experiments deterministic.
 
 > **Tip**
 > MMMU-Pro requires `model.is_vlm: true` so the runner can feed images through

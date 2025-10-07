@@ -33,25 +33,42 @@ class _DummyTextTokenizer:
             " correct": [1, 2],
             " wrong": [3, 4],
         }
+        self.reverse = {1: "c", 2: "orrect", 3: "w", 4: "rong"}
+        self.pad_token_id = 0
+        self.eos_token_id = 99
 
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         return list(self.mapping[text])
+
+    def decode(self, tokens: list[int], skip_special_tokens: bool = True) -> str:
+        return "".join(self.reverse.get(token, "") for token in tokens)
 
 
 class _DummyTextModel:
     def __call__(self, *, input_ids: torch.Tensor):
         tokens = input_ids.tolist()[0]
+        seq_len = len(tokens)
+        vocab_size = max(max(tokens) + 1, 6)
+        logits = torch.zeros((1, seq_len, vocab_size), dtype=torch.float32)
         if tokens[1] == 1:  # option "correct"
-            logits = torch.tensor(
-                [[[5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0]]],
-                dtype=torch.float32,
-            )
+            weight = 5.0
         else:  # option "wrong"
-            logits = torch.tensor(
-                [[[0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0]]],
-                dtype=torch.float32,
-            )
+            weight = -5.0
+        for index, token in enumerate(tokens[1:], start=0):
+            logits[0, index, token] = weight
         return SimpleNamespace(logits=logits)
+
+    def generate(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        do_sample: bool,
+        pad_token_id: int | None,
+    ) -> torch.Tensor:
+        suffix = torch.tensor([[1, 2]], dtype=torch.long)
+        return torch.cat([input_ids, suffix[:, : max_new_tokens]], dim=1)
 
 
 class _DummyProcessor:
@@ -70,21 +87,36 @@ class _DummyProcessor:
         }
         return _DummyEncoding(mapping[text])
 
+    @property
+    def tokenizer(self) -> _DummyTextTokenizer:  # type: ignore[override]
+        return _DummyTextTokenizer()
+
 
 class _DummyVLMModel:
     def __call__(self, *, input_ids: torch.Tensor):
         tokens = input_ids.tolist()[0]
+        seq_len = len(tokens)
+        vocab_size = max(max(tokens) + 1, 6)
+        logits = torch.zeros((1, seq_len, vocab_size), dtype=torch.float32)
         if tokens[2] == 1:  # option "cat"
-            logits = torch.tensor(
-                [[[5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0], [5.0, 5.0, 5.0, 0.0, 0.0]]],
-                dtype=torch.float32,
-            )
+            weight = 5.0
         else:  # option "dog"
-            logits = torch.tensor(
-                [[[0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0], [0.0, 0.0, 0.0, 5.0, 5.0]]],
-                dtype=torch.float32,
-            )
+            weight = -5.0
+        for index, token in enumerate(tokens[1:], start=0):
+            logits[0, index, token] = weight
         return SimpleNamespace(logits=logits)
+
+    def generate(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        max_new_tokens: int,
+        do_sample: bool,
+        pad_token_id: int | None,
+    ) -> torch.Tensor:
+        suffix = torch.tensor([[1, 2]], dtype=torch.long)
+        return torch.cat([input_ids, suffix[:, : max_new_tokens]], dim=1)
 
 
 def _build_simple_text_model() -> SimpleModel:
@@ -118,6 +150,18 @@ def test_rank_log_likelihood_multimodal_prefers_high_prob_option():
         messages, images=(), options=["cat", "dog"]
     )
     assert result == 0
+
+
+def test_generate_text_for_text_model_uses_greedy_suffix():
+    model = _build_simple_text_model()
+    result = model.generate_text("prompt", max_new_tokens=2)
+    assert result == "correct"
+
+
+def test_generate_text_for_vlm_accepts_string_prompt():
+    model = _build_simple_vlm_model()
+    result = model.generate_text("prompt", images=[object()], max_new_tokens=1)
+    assert result == "c"
 
 
 def test_set_seed_cpu_only(monkeypatch):
