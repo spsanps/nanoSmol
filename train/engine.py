@@ -1,7 +1,6 @@
 """Accelerate-powered trainer with NanoGPT-style clarity."""
 from __future__ import annotations
 
-import itertools
 import json
 import math
 import os
@@ -196,7 +195,8 @@ class Trainer:
         )
 
     def train(self) -> None:
-        data_iterator = itertools.cycle(self.dataloader)
+        data_iterator = iter(self.dataloader)
+        epoch = 0
         start_time = perf_counter()
         last_log_time = start_time
         total_tokens = 0
@@ -211,7 +211,18 @@ class Trainer:
             group.setdefault("base_lr", group.get("lr", self.cfg.lr))
 
         while step < self.cfg.max_steps:
-            batch = next(data_iterator)
+            try:
+                batch = next(data_iterator)
+            except StopIteration:
+                epoch += 1
+                sampler = getattr(self.dataloader, "sampler", None)
+                if sampler is not None and hasattr(sampler, "set_epoch"):
+                    sampler.set_epoch(epoch)
+                data_iterator = iter(self.dataloader)
+                try:
+                    batch = next(data_iterator)
+                except StopIteration as exc:
+                    raise RuntimeError("dataloader produced no batches") from exc
             batch = self._prepare_batch(batch)
 
             attention = batch.get("attention_mask")
