@@ -19,3 +19,14 @@ tasks:
     dataset:
       subset_name: "standard (10 options)"
       split: test
+  - task: textvqa
+    dataset:
+      split: validation
+      subset_size: 512
+    generation:
+      max_new_tokens: 32
+  - task: mme
+    dataset:
+      split: test
+    generation:
+      max_new_tokens: 5
