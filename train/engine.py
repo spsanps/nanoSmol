@@ -1,14 +1,15 @@
 """Accelerate-powered trainer with NanoGPT-style clarity."""
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
-import itertools
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -47,12 +48,35 @@ class TrainingConfig:
     track_tokens: bool = True
     track_samples: bool = True
     grad_clip_eps: float = 1e-3
+    checkpoint_dir: Optional[str] = "artifacts/checkpoints"
+    checkpoint_interval: Optional[int] = None
+    num_checkpoints: int = 10
+    checkpoint_total_limit: Optional[int] = None
+    final_model_dir: Optional[str] = "artifacts/final-model"
+    hub_model_id: Optional[str] = None
+    hub_revision: Optional[str] = None
+    hub_token: Optional[str] = None
+    hub_private: bool = False
+    hub_commit_message: str = "Add trained weights"
+    hub_push_final: bool = False
 
 
 def _init_accelerator(cfg: TrainingConfig) -> Accelerator:
     if Accelerator is None:  # pragma: no cover - accelerate optional for import
         raise ImportError("accelerate is required for multi-GPU training")
     return Accelerator(gradient_accumulation_steps=cfg.grad_accum_steps, mixed_precision=cfg.mixed_precision)
+
+
+def _resolve_checkpoint_interval(cfg: TrainingConfig) -> Optional[int]:
+    """Determine how frequently checkpoints should be written."""
+
+    if cfg.checkpoint_interval is not None:
+        if cfg.checkpoint_interval <= 0:
+            return None
+        return cfg.checkpoint_interval
+    if cfg.num_checkpoints <= 0 or cfg.max_steps <= 0:
+        return None
+    return max(1, cfg.max_steps // cfg.num_checkpoints)
 
 
 class TrainingLogger:
@@ -127,18 +151,25 @@ class Trainer:
         cfg: TrainingConfig,
         *,
         accelerator: Optional[Accelerator] = None,
+        tokenizer: Optional[object] = None,
     ) -> None:
         self.cfg = cfg
         self.accelerator = accelerator or _init_accelerator(cfg)
         self.model = model
         self.optimizer = optimizer
         self.dataloader = dataloader
+        self.tokenizer = tokenizer
         if cfg.compile_model:
             self.model = torch.compile(self.model)  # type: ignore[attr-defined]
         self.model, self.optimizer, self.dataloader = self.accelerator.prepare(
             self.model, self.optimizer, self.dataloader
         )
         self.logger = TrainingLogger(cfg, self.accelerator)
+        self._checkpoint_interval = _resolve_checkpoint_interval(cfg)
+        self._checkpoint_dir: Optional[Path] = Path(cfg.checkpoint_dir) if cfg.checkpoint_dir else None
+        if self._checkpoint_dir is not None and self.accelerator.is_main_process:
+            os.makedirs(self._checkpoint_dir, exist_ok=True)
+        self._saved_checkpoints: List[Tuple[int, Path]] = []
 
     def _warmup_factor(self, step: int) -> float:
         if self.cfg.warmup_steps <= 0:
@@ -215,6 +246,8 @@ class Trainer:
                 total_tokens += running_tokens
                 total_samples += running_samples
 
+                self._maybe_save_checkpoint(step)
+
                 if step % self.cfg.log_every == 0 or step == 1:
                     now = perf_counter()
                     elapsed = max(now - start_time, 1e-6)
@@ -237,5 +270,99 @@ class Trainer:
                     last_log_time = now
 
         self.accelerator.wait_for_everyone()
+        if step >= self.cfg.max_steps:
+            self._maybe_save_checkpoint(step, force=True)
+        final_dir = self._save_final_model()
+        self._push_to_hub(final_dir)
         self.logger.finalize()
+
+    # ---------------------------------------------------------------------
+    # Checkpointing helpers
+    # ---------------------------------------------------------------------
+    def _maybe_save_checkpoint(self, step: int, *, force: bool = False) -> None:
+        if not self.accelerator.is_main_process:
+            return
+        if self._checkpoint_dir is None:
+            return
+        if not force:
+            if self._checkpoint_interval is None:
+                return
+            if step % self._checkpoint_interval != 0 and step < self.cfg.max_steps:
+                return
+        self.accelerator.wait_for_everyone()
+        ckpt_path = self._checkpoint_dir / f"step_{step:06d}"
+        self.accelerator.print(f"saving checkpoint to {ckpt_path}")
+        self.accelerator.save_state(str(ckpt_path))
+        self._saved_checkpoints.append((step, ckpt_path))
+        limit = self.cfg.checkpoint_total_limit or (
+            self.cfg.num_checkpoints if self.cfg.num_checkpoints > 0 else None
+        )
+        if limit is not None and len(self._saved_checkpoints) > limit:
+            old_step, old_path = self._saved_checkpoints.pop(0)
+            self.accelerator.print(f"removing old checkpoint step {old_step} at {old_path}")
+            shutil.rmtree(old_path, ignore_errors=True)
+
+    # ---------------------------------------------------------------------
+    # Final model export + hub upload
+    # ---------------------------------------------------------------------
+    def _save_final_model(self) -> Optional[Path]:
+        if not self.accelerator.is_main_process:
+            return None
+        if self.cfg.final_model_dir is None:
+            return None
+        output_dir = Path(self.cfg.final_model_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        unwrapped.save_pretrained(output_dir, safe_serialization=True)
+        tokenizer = self.tokenizer
+        if tokenizer is not None:
+            save_fn = getattr(tokenizer, "save_pretrained", None)
+            if callable(save_fn):  # pragma: no branch - defensive
+                save_fn(output_dir)
+        self.accelerator.print(f"saved final model to {output_dir}")
+        return output_dir
+
+    def _push_to_hub(self, output_dir: Optional[Path]) -> None:
+        if not self.accelerator.is_main_process:
+            return
+        if not self.cfg.hub_push_final or not self.cfg.hub_model_id:
+            return
+        if output_dir is None:
+            self.accelerator.print("no final model directory available to push")
+            return
+        try:  # pragma: no cover - huggingface_hub is optional for tests
+            from huggingface_hub import HfApi, create_repo
+        except Exception as exc:  # pragma: no cover - optional dependency
+            self.accelerator.print(f"huggingface_hub unavailable, skipping push: {exc}")
+            return
+
+        token = self.cfg.hub_token
+        api = HfApi(token=token)
+        try:
+            create_repo(
+                repo_id=self.cfg.hub_model_id,
+                token=token,
+                private=self.cfg.hub_private,
+                exist_ok=True,
+                repo_type="model",
+            )
+        except Exception as exc:  # pragma: no cover - API failure handling
+            self.accelerator.print(f"failed to ensure hub repo exists: {exc}")
+            return
+
+        revision = self.cfg.hub_revision or "main"
+        try:
+            api.upload_folder(
+                folder_path=str(output_dir),
+                repo_id=self.cfg.hub_model_id,
+                repo_type="model",
+                revision=revision,
+                commit_message=self.cfg.hub_commit_message,
+                token=token,
+            )
+            self.accelerator.print(
+                f"pushed final model to https://huggingface.co/{self.cfg.hub_model_id} (rev {revision})"
+            )
+        except Exception as exc:  # pragma: no cover - API failure handling
+            self.accelerator.print(f"failed to push final model to hub: {exc}")
 

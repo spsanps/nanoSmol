@@ -43,4 +43,13 @@ python scripts/train_multimodal.py \
 Adapters are pluggable (register them in ``train.data``), so future datasets can
 reuse the same training loop without rewriting data plumbing.  The logger emits
 loss, learning-rate, tokens/sec, samples/sec, and cumulative counters so you can
-track efficiency during long runs.
+track efficiency during long runs. Checkpointing and model exports are handled
+for you as well:
+
+- ``--num-checkpoints`` / ``--checkpoint-interval`` keep at most a handful of
+  restore points during the run (default ≈10 evenly spaced saves).
+- ``--checkpoint-dir`` and ``--checkpoint-limit`` control where checkpoints
+  land and how many we keep on disk.
+- ``--final-model-dir`` saves the last-step weights (plus tokenizer) locally and
+  ``--push-to-hub`` uploads that bundle to ``--hub-model-id`` using the provided
+  branch/token configuration.

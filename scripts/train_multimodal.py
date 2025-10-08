@@ -48,6 +48,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wandb-run", type=str, default=None, help="Weights & Biases run name")
     parser.add_argument("--wandb-group", type=str, default=None, help="Weights & Biases group name")
     parser.add_argument("--resume-wandb", action="store_true", help="Resume an existing Weights & Biases run")
+    parser.add_argument("--checkpoint-dir", type=Path, default=Path("artifacts/checkpoints"), help="Folder for training checkpoints")
+    parser.add_argument("--checkpoint-interval", type=int, default=None, help="Steps between checkpoints (overrides --num-checkpoints)")
+    parser.add_argument("--num-checkpoints", type=int, default=10, help="Target number of checkpoints across the run")
+    parser.add_argument("--checkpoint-limit", type=int, default=None, help="Maximum checkpoints to retain (oldest pruned)")
+    parser.add_argument("--final-model-dir", type=Path, default=Path("artifacts/final-model"), help="Directory for the exported final model")
+    parser.add_argument("--hub-model-id", type=str, default=None, help="Hugging Face repository to push the final model to")
+    parser.add_argument("--hub-branch", type=str, default=None, help="Hugging Face branch/revision for uploads")
+    parser.add_argument("--hub-private", action="store_true", help="Create the Hugging Face repo as private")
+    parser.add_argument("--hub-token", type=str, default=None, help="Hugging Face user token (uses env token if omitted)")
+    parser.add_argument("--hub-commit-message", type=str, default="Add trained weights", help="Commit message when pushing to Hugging Face")
+    parser.add_argument("--push-to-hub", action="store_true", help="Upload the final model to Hugging Face after training")
     return parser.parse_args()
 
 
@@ -89,6 +100,17 @@ def main() -> None:
         wandb_run_name=args.wandb_run,
         wandb_group=args.wandb_group,
         resume_wandb=args.resume_wandb,
+        checkpoint_dir=str(args.checkpoint_dir) if args.checkpoint_dir else None,
+        checkpoint_interval=args.checkpoint_interval,
+        num_checkpoints=args.num_checkpoints,
+        checkpoint_total_limit=args.checkpoint_limit,
+        final_model_dir=str(args.final_model_dir) if args.final_model_dir else None,
+        hub_model_id=args.hub_model_id,
+        hub_revision=args.hub_branch,
+        hub_token=args.hub_token,
+        hub_private=args.hub_private,
+        hub_commit_message=args.hub_commit_message,
+        hub_push_final=args.push_to_hub,
     )
 
     dataloader = build_chat_dataloader(
@@ -106,7 +128,7 @@ def main() -> None:
         weight_decay=train_cfg.weight_decay,
     )
 
-    trainer = Trainer(model, optimizer, dataloader, train_cfg)
+    trainer = Trainer(model, optimizer, dataloader, train_cfg, tokenizer=tokenizer)
     trainer.train()
 
 
