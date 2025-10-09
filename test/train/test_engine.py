@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("torch")
@@ -52,3 +54,32 @@ def test_save_final_model_falls_back_to_state_dict(tmp_path) -> None:
     expected_path = tmp_path / "final" / "pytorch_model.bin"
     assert output_dir == tmp_path / "final"
     assert expected_path.exists(), "Fallback torch.save should create pytorch_model.bin"
+
+
+def test_final_checkpoint_is_not_evicted_when_limit_is_one(tmp_path) -> None:
+    class DummyAccelerator:
+        is_main_process = True
+
+        def save_state(self, output_dir: str) -> None:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        def print(self, *args, **kwargs) -> None:
+            pass
+
+        def wait_for_everyone(self) -> None:
+            pass
+
+    trainer = Trainer.__new__(Trainer)
+    trainer.cfg = TrainingConfig(checkpoint_total_limit=1)
+    trainer.accelerator = DummyAccelerator()
+    trainer._checkpoint_dir = tmp_path
+    trainer._checkpoint_interval = 5
+    trainer._saved_checkpoints = []
+
+    step = 10
+    trainer._maybe_save_checkpoint(step)  # initial save from loop when divisible by interval
+    trainer._maybe_save_checkpoint(step, force=True)  # forced save after training completes
+
+    final_path = tmp_path / "step_000010"
+    assert final_path.exists(), "Final checkpoint directory should still exist after forced save"
+    assert trainer._saved_checkpoints == [(step, final_path)]

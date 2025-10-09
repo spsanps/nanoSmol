@@ -304,6 +304,18 @@ class Trainer:
         ckpt_path = self._checkpoint_dir / f"step_{step:06d}"
         self.accelerator.print(f"saving checkpoint to {ckpt_path}")
         self.accelerator.save_state(str(ckpt_path))
+
+        existing_idx = next(
+            (
+                idx
+                for idx, (saved_step, saved_path) in enumerate(self._saved_checkpoints)
+                if saved_step == step or saved_path == ckpt_path
+            ),
+            None,
+        )
+        if existing_idx is not None:
+            self._saved_checkpoints.pop(existing_idx)
+
         self._saved_checkpoints.append((step, ckpt_path))
         limit = self.cfg.checkpoint_total_limit or (
             self.cfg.num_checkpoints if self.cfg.num_checkpoints > 0 else None
