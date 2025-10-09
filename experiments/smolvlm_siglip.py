@@ -4,15 +4,69 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_safetensors
-from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
+from torch.utils.data import DataLoader
+from transformers import (
+    AutoConfig,
+    AutoProcessor,
+    AutoTokenizer,
+    PreTrainedTokenizerBase,
+    ProcessorMixin,
+)
 
 from models.smolVLM.config import SmolVLMConfig
 from models.smolVLM.model import SmolVLM
+from train.data import ChatDataConfig, StreamingChatDataset
+
+
+class _ProcessorBackedCollator:
+    """Collate chat samples using the official Hugging Face processor."""
+
+    def __init__(self, processor: ProcessorMixin, *, max_images: int) -> None:
+        self.processor = processor
+        self.max_images = max_images
+
+    def _build_prompt(self, messages: Iterable[Dict[str, object]]) -> str:
+        return self.processor.apply_chat_template(  # type: ignore[call-arg]
+            list(messages), add_generation_prompt=False, tokenize=False
+        )
+
+    def __call__(self, batch: List[Dict[str, object]]) -> Dict[str, torch.Tensor]:
+        features: List[Dict[str, torch.Tensor]] = []
+        for sample in batch:
+            prompt = self._build_prompt(sample["messages"])
+            images = []
+            for image in sample.get("images", []):
+                if len(images) >= self.max_images:
+                    break
+                if hasattr(image, "convert"):
+                    images.append(image.convert("RGB"))
+                else:
+                    images.append(image)
+            processor_kwargs = {"text": [prompt], "return_tensors": "pt"}
+            if images:
+                processor_kwargs["images"] = images
+            encoded = self.processor(**processor_kwargs)
+            tensor_data = {
+                key: value.squeeze(0) if isinstance(value, torch.Tensor) else value
+                for key, value in encoded.items()
+            }
+            features.append(tensor_data)
+
+        batch_encoding = self.processor.pad(
+            features, padding=True, return_tensors="pt"
+        )
+        if "labels" not in batch_encoding:
+            labels = batch_encoding["input_ids"].clone()
+            attention = batch_encoding.get("attention_mask")
+            if attention is not None:
+                labels = labels.masked_fill(attention == 0, -100)
+            batch_encoding["labels"] = labels
+        return {key: value for key, value in batch_encoding.items()}
 
 
 @dataclass
@@ -22,6 +76,7 @@ class ExperimentArtifacts:
     model: SmolVLM
     tokenizer: PreTrainedTokenizerBase
     model_config: SmolVLMConfig
+    processor: ProcessorMixin
 
 
 class SmolVLMSiglipExperiment:
@@ -59,6 +114,12 @@ class SmolVLMSiglipExperiment:
             use_fast=True,
             local_files_only=args.model_local_only,
         )
+        processor = AutoProcessor.from_pretrained(
+            args.model,
+            revision=args.model_revision,
+            token=args.model_token,
+            local_files_only=args.model_local_only,
+        )
 
         model = SmolVLM(model_cfg)
         state_dict = self._download_state_dict(
@@ -72,7 +133,35 @@ class SmolVLMSiglipExperiment:
         finally:
             # Release the (potentially multi-gigabyte) checkpoint immediately.
             state_dict.clear()
-        return ExperimentArtifacts(model=model, tokenizer=tokenizer, model_config=model_cfg)
+        return ExperimentArtifacts(
+            model=model,
+            tokenizer=tokenizer,
+            model_config=model_cfg,
+            processor=processor,
+        )
+
+    # --------------------------------------------------------------- dataloader
+    def build_dataloader(
+        self,
+        cfg: ChatDataConfig,
+        *,
+        tokenizer: PreTrainedTokenizerBase,
+        model_config: SmolVLMConfig,
+        processor: ProcessorMixin,
+        batch_size: int,
+        num_workers: int = 0,
+    ) -> DataLoader:
+        collator = _ProcessorBackedCollator(
+            processor, max_images=cfg.max_images
+        )
+        dataset = StreamingChatDataset(cfg)
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            collate_fn=collator,
+            pin_memory=True,
+        )
 
     # ----------------------------------------------------------------- weights
     def _download_state_dict(

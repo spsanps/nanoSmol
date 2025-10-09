@@ -167,13 +167,26 @@ def main() -> None:
         hub_push_final=args.push_to_hub,
     )
 
-    dataloader = build_chat_dataloader(
-        data_cfg,
-        tokenizer=tokenizer,
-        model_cfg=model_cfg,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-    )
+    if hasattr(experiment, "build_dataloader"):
+        processor = getattr(artifacts, "processor", None)
+        if processor is None:
+            raise ValueError("Experiment requires a processor but none was provided")
+        dataloader = experiment.build_dataloader(
+            data_cfg,
+            tokenizer=tokenizer,
+            model_config=model_cfg,
+            processor=processor,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+    else:
+        dataloader = build_chat_dataloader(
+            data_cfg,
+            tokenizer=tokenizer,
+            model_cfg=model_cfg,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
