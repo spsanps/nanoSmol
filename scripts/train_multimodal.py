@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Tuple
 
 import torch
-from transformers import AutoConfig, AutoTokenizer
 
-from models.smolVLM.config import SmolVLMConfig
-from models.smolVLM.model import SmolVLM
+from experiments import available_experiments, get_experiment
 from train import (
     ChatDataConfig,
     TrainingConfig,
@@ -18,11 +17,25 @@ from train import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Multimodal fine-tuning loop (accelerate-powered)")
-    parser.add_argument("--model", type=str, required=True, help="Hugging Face model id (e.g. HuggingFaceM4/smolvlm-instruct)")
-    parser.add_argument("--adapter", type=str, default="finevision", choices=available_adapters(), help="Dataset adapter key")
-    parser.add_argument("--dataset", type=str, default="HuggingFaceM4/FineVision-1.0", help="Dataset repository id")
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        default="smolvlm-siglip",
+        choices=list(available_experiments()),
+        help="Experiment wiring that instantiates the model/tokenizer stack",
+    )
+    parser.add_argument("--model", type=str, default=None, help="Hugging Face model id for weights + tokenizer")
+    parser.add_argument("--model-revision", type=str, default=None, help="Optional model revision (branch/tag/commit)")
+    parser.add_argument("--model-token", type=str, default=None, help="Hugging Face token for private models")
+    parser.add_argument(
+        "--model-local-only",
+        action="store_true",
+        help="Only use locally cached model weights (no network calls)",
+    )
+    parser.add_argument("--adapter", type=str, default=None, help="Dataset adapter key")
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset repository id")
     parser.add_argument("--subset", type=str, default=None, help="Optional dataset subset name")
     parser.add_argument("--split", type=str, default="train", help="Dataset split to stream")
     parser.add_argument("--streaming", action="store_true", help="Enable 🤗 streaming")
@@ -42,33 +55,74 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping (disabled if negative)")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader worker processes")
     parser.add_argument("--compile", action="store_true", help="Torch compile the model")
-    parser.add_argument("--mixed-precision", type=str, default="bf16", choices=["no", "fp16", "bf16"], help="Accelerate mixed precision mode")
+    parser.add_argument(
+        "--mixed-precision",
+        type=str,
+        default="bf16",
+        choices=["no", "fp16", "bf16"],
+        help="Accelerate mixed precision mode",
+    )
     parser.add_argument("--log-dir", type=Path, default=Path("artifacts/train"), help="Directory for logs + plots")
     parser.add_argument("--wandb-project", type=str, default=None, help="Weights & Biases project name")
     parser.add_argument("--wandb-run", type=str, default=None, help="Weights & Biases run name")
     parser.add_argument("--wandb-group", type=str, default=None, help="Weights & Biases group name")
     parser.add_argument("--resume-wandb", action="store_true", help="Resume an existing Weights & Biases run")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("artifacts/checkpoints"), help="Folder for training checkpoints")
-    parser.add_argument("--checkpoint-interval", type=int, default=None, help="Steps between checkpoints (overrides --num-checkpoints)")
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=None,
+        help="Steps between checkpoints (overrides --num-checkpoints)",
+    )
     parser.add_argument("--num-checkpoints", type=int, default=10, help="Target number of checkpoints across the run")
-    parser.add_argument("--checkpoint-limit", type=int, default=None, help="Maximum checkpoints to retain (oldest pruned)")
-    parser.add_argument("--final-model-dir", type=Path, default=Path("artifacts/final-model"), help="Directory for the exported final model")
+    parser.add_argument(
+        "--checkpoint-limit",
+        type=int,
+        default=None,
+        help="Maximum checkpoints to retain (oldest pruned)",
+    )
+    parser.add_argument(
+        "--final-model-dir",
+        type=Path,
+        default=Path("artifacts/final-model"),
+        help="Directory for the exported final model",
+    )
     parser.add_argument("--hub-model-id", type=str, default=None, help="Hugging Face repository to push the final model to")
     parser.add_argument("--hub-branch", type=str, default=None, help="Hugging Face branch/revision for uploads")
     parser.add_argument("--hub-private", action="store_true", help="Create the Hugging Face repo as private")
     parser.add_argument("--hub-token", type=str, default=None, help="Hugging Face user token (uses env token if omitted)")
-    parser.add_argument("--hub-commit-message", type=str, default="Add trained weights", help="Commit message when pushing to Hugging Face")
+    parser.add_argument(
+        "--hub-commit-message",
+        type=str,
+        default="Add trained weights",
+        help="Commit message when pushing to Hugging Face",
+    )
     parser.add_argument("--push-to-hub", action="store_true", help="Upload the final model to Hugging Face after training")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> Tuple[argparse.Namespace, object]:
+    parser = build_parser()
+    args = parser.parse_args()
+    experiment = get_experiment(args.experiment)
+    experiment.apply_defaults(args)
+
+    adapter_choices = set(available_adapters())
+    if args.adapter not in adapter_choices:
+        parser.error(f"Unknown adapter '{args.adapter}'. Available: {sorted(adapter_choices)}")
+
+    if args.dataset is None:
+        parser.error("--dataset must be provided either explicitly or via the experiment defaults")
+
+    return args, experiment
 
 
 def main() -> None:
-    args = parse_args()
-
-    hf_cfg = AutoConfig.from_pretrained(args.model)
-    model_cfg = SmolVLMConfig.from_hf_config(hf_cfg)
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
-    model = SmolVLM(model_cfg)
+    args, experiment = parse_args()
+    artifacts = experiment.build(args)
+    model = artifacts.model
+    tokenizer = artifacts.tokenizer
+    model_cfg = artifacts.model_config
 
     data_cfg = ChatDataConfig(
         repo_id=args.dataset,
@@ -134,4 +188,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

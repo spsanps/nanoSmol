@@ -31,14 +31,20 @@ FineVision is just the default adapter; to fine-tune a Hugging Face
 
 ```bash
 python scripts/train_multimodal.py \
+  --experiment smolvlm-siglip \
   --model HuggingFaceM4/smolvlm-instruct \
-  --adapter finevision \
   --streaming \
   --batch-size 8 \
   --grad-accum 4 \
   --max-steps 1000 \
   --wandb-project nanoSmol
 ```
+
+The experiment wiring lives under ``experiments/``—``smolvlm-siglip`` wires up
+SigLIP vision + SmolVLM, loads both modules from the Hugging Face checkpoint you
+point ``--model`` at (``--model-revision`` / ``--model-token`` are available for
+private repos), and hands everything to the generic training loop.  Use
+``--model-local-only`` to ensure we only touch your local cache.
 
 Adapters are pluggable (register them in ``train.data``), so future datasets can
 reuse the same training loop without rewriting data plumbing.  The logger emits
