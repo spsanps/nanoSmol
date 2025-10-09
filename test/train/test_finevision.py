@@ -94,3 +94,24 @@ def test_collator_batches_and_masks_user_tokens() -> None:
     labels = batch["labels"]
     assert (labels == -100).any()
     assert (labels != -100).any()
+
+
+def test_conversation_tokenizer_repeats_image_tokens() -> None:
+    tokenizer = DummyTokenizer()
+    wrapper = ConversationTokenizer(
+        tokenizer,
+        image_token_id=8,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+        image_token_repeats=4,
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "image", "image": Image.new("RGB", (2, 2), color=0)}],
+        }
+    ]
+    encoded = wrapper.render(messages)
+    assert encoded["input_ids"].tolist().count(8) == 4
+    assert encoded["labels"].tolist().count(-100) >= 4
