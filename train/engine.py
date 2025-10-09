@@ -291,8 +291,6 @@ class Trainer:
     # Checkpointing helpers
     # ---------------------------------------------------------------------
     def _maybe_save_checkpoint(self, step: int, *, force: bool = False) -> None:
-        if not self.accelerator.is_main_process:
-            return
         if self._checkpoint_dir is None:
             return
         if not force:
@@ -301,6 +299,8 @@ class Trainer:
             if step % self._checkpoint_interval != 0 and step < self.cfg.max_steps:
                 return
         self.accelerator.wait_for_everyone()
+        if not self.accelerator.is_main_process:
+            return
         ckpt_path = self._checkpoint_dir / f"step_{step:06d}"
         self.accelerator.print(f"saving checkpoint to {ckpt_path}")
         self.accelerator.save_state(str(ckpt_path))
