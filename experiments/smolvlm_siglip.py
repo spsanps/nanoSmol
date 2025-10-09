@@ -45,13 +45,19 @@ class SmolVLMSiglipExperiment:
     def build(self, args) -> ExperimentArtifacts:
         """Instantiate SmolVLM and load pretrained weights from Hugging Face."""
 
-        hf_cfg = AutoConfig.from_pretrained(args.model, revision=args.model_revision, token=args.model_token)
+        hf_cfg = AutoConfig.from_pretrained(
+            args.model,
+            revision=args.model_revision,
+            token=args.model_token,
+            local_files_only=args.model_local_only,
+        )
         model_cfg = SmolVLMConfig.from_hf_config(hf_cfg)
         tokenizer = AutoTokenizer.from_pretrained(
             args.model,
             revision=args.model_revision,
             token=args.model_token,
             use_fast=True,
+            local_files_only=args.model_local_only,
         )
 
         model = SmolVLM(model_cfg)
