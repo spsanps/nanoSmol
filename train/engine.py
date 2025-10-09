@@ -324,7 +324,12 @@ class Trainer:
         output_dir = Path(self.cfg.final_model_dir)
         os.makedirs(output_dir, exist_ok=True)
         unwrapped = self.accelerator.unwrap_model(self.model)
-        unwrapped.save_pretrained(output_dir, safe_serialization=True)
+        save_pretrained = getattr(unwrapped, "save_pretrained", None)
+        if callable(save_pretrained):
+            save_pretrained(output_dir, safe_serialization=True)
+        else:
+            # Plain ``nn.Module`` subclasses (e.g. SmolVLM) expose ``state_dict`` only.
+            torch.save(unwrapped.state_dict(), output_dir / "pytorch_model.bin")
         tokenizer = self.tokenizer
         if tokenizer is not None:
             save_fn = getattr(tokenizer, "save_pretrained", None)
