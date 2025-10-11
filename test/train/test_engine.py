@@ -1,85 +1,117 @@
-from __future__ import annotations
-
-from pathlib import Path
+import contextlib
 
 import pytest
 
 pytest.importorskip("torch")
 
+import torch
 from torch import nn
+from torch.utils.data import DataLoader
 
-from train.engine import TrainingConfig, Trainer, _resolve_checkpoint_interval
-
-
-def test_resolve_checkpoint_interval_uses_explicit_override() -> None:
-    cfg = TrainingConfig(checkpoint_interval=5, num_checkpoints=99, max_steps=100)
-    assert _resolve_checkpoint_interval(cfg) == 5
+from train.engine import ConsoleMetricLogger, StepOutput, Trainer, TrainerCallback, TrainingConfig
 
 
-def test_resolve_checkpoint_interval_derives_from_count() -> None:
-    cfg = TrainingConfig(checkpoint_interval=None, num_checkpoints=10, max_steps=1000)
-    assert _resolve_checkpoint_interval(cfg) == 100
+class DummyAccelerator:
+    def __init__(self, grad_accum_steps: int = 1) -> None:
+        self.grad_accum_steps = grad_accum_steps
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.is_main_process = True
+        self.sync_gradients = True
+
+    def prepare(self, model, optimizer, dataloader):
+        return model.to(self.device), optimizer, dataloader
+
+    def accumulate(self, model):
+        return contextlib.nullcontext()
+
+    def backward(self, loss):
+        loss.backward()
+
+    def gather(self, tensor):
+        return tensor.detach()
+
+    def wait_for_everyone(self):
+        pass
 
 
-def test_resolve_checkpoint_interval_handles_disabled() -> None:
-    cfg = TrainingConfig(checkpoint_interval=None, num_checkpoints=0, max_steps=1000)
-    assert _resolve_checkpoint_interval(cfg) is None
+class TinyDataset(torch.utils.data.Dataset):
+    def __init__(self, inputs: torch.Tensor, targets: torch.Tensor) -> None:
+        self.inputs = inputs
+        self.targets = targets
+
+    def __len__(self) -> int:
+        return self.inputs.size(0)
+
+    def __getitem__(self, index: int):
+        return {"x": self.inputs[index], "y": self.targets[index]}
 
 
-def test_save_final_model_falls_back_to_state_dict(tmp_path) -> None:
-    class DummyAccelerator:
-        is_main_process = True
+def build_toy_step_fn():
+    def step_fn(model: nn.Module, batch):
+        preds = model(batch["x"])
+        loss = torch.nn.functional.mse_loss(preds, batch["y"])
+        return StepOutput(loss=loss, samples=batch["x"].size(0), metrics={"mse": float(loss.detach())})
 
-        def unwrap_model(self, model: nn.Module) -> nn.Module:
-            return model
-
-        def print(self, *args, **kwargs) -> None:
-            pass
-
-        def wait_for_everyone(self) -> None:
-            pass
-
-    class TinyModule(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.linear = nn.Linear(4, 2)
-
-    trainer = Trainer.__new__(Trainer)
-    trainer.cfg = TrainingConfig(final_model_dir=str(tmp_path / "final"))
-    trainer.accelerator = DummyAccelerator()
-    trainer.model = TinyModule()
-    trainer.tokenizer = None
-
-    output_dir = trainer._save_final_model()
-    expected_path = tmp_path / "final" / "pytorch_model.bin"
-    assert output_dir == tmp_path / "final"
-    assert expected_path.exists(), "Fallback torch.save should create pytorch_model.bin"
+    return step_fn
 
 
-def test_final_checkpoint_is_not_evicted_when_limit_is_one(tmp_path) -> None:
-    class DummyAccelerator:
-        is_main_process = True
+class Recorder(TrainerCallback):
+    def __init__(self) -> None:
+        self.logged_steps = []
+        self.final_step = None
 
-        def save_state(self, output_dir: str) -> None:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
+    def on_log(self, trainer, state, metrics):
+        self.logged_steps.append((state.step, metrics["loss"]))
 
-        def print(self, *args, **kwargs) -> None:
-            pass
+    def on_train_end(self, trainer, state):
+        self.final_step = state.step
 
-        def wait_for_everyone(self) -> None:
-            pass
 
-    trainer = Trainer.__new__(Trainer)
-    trainer.cfg = TrainingConfig(checkpoint_total_limit=1)
-    trainer.accelerator = DummyAccelerator()
-    trainer._checkpoint_dir = tmp_path
-    trainer._checkpoint_interval = 5
-    trainer._saved_checkpoints = []
+def test_trainer_runs_and_logs(tmp_path) -> None:
+    torch.manual_seed(0)
+    inputs = torch.randn(16, 4)
+    targets = torch.randn(16, 2)
+    dataset = TinyDataset(inputs, targets)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
 
-    step = 10
-    trainer._maybe_save_checkpoint(step)  # initial save from loop when divisible by interval
-    trainer._maybe_save_checkpoint(step, force=True)  # forced save after training completes
+    model = nn.Sequential(nn.Linear(4, 8), nn.Tanh(), nn.Linear(8, 2))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    step_fn = build_toy_step_fn()
 
-    final_path = tmp_path / "step_000010"
-    assert final_path.exists(), "Final checkpoint directory should still exist after forced save"
-    assert trainer._saved_checkpoints == [(step, final_path)]
+    recorder = Recorder()
+    cfg = TrainingConfig(max_steps=5, log_every=1, grad_accum_steps=1, learning_rate=1e-3, warmup_steps=2)
+    trainer = Trainer(
+        model,
+        optimizer,
+        dataloader,
+        cfg,
+        step_fn,
+        callbacks=[recorder, ConsoleMetricLogger()],
+        accelerator=DummyAccelerator(),
+    )
+    state = trainer.train()
+
+    assert state.step == cfg.max_steps
+    assert recorder.final_step == cfg.max_steps
+    assert len(recorder.logged_steps) >= 1
+
+
+def test_trainer_warmup_adjusts_learning_rate() -> None:
+    torch.manual_seed(0)
+    dataset = TinyDataset(torch.randn(4, 3), torch.randn(4, 1))
+    dataloader = DataLoader(dataset, batch_size=2)
+    model = nn.Sequential(nn.Linear(3, 4), nn.ReLU(), nn.Linear(4, 1))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0)
+    cfg = TrainingConfig(max_steps=3, warmup_steps=2, learning_rate=1.0, grad_accum_steps=1)
+    trainer = Trainer(
+        model,
+        optimizer,
+        dataloader,
+        cfg,
+        build_toy_step_fn(),
+        accelerator=DummyAccelerator(),
+    )
+    trainer.train()
+
+    lrs = [group["lr"] for group in optimizer.param_groups]
+    assert all(abs(lr - cfg.learning_rate) < 1e-5 for lr in lrs)
