@@ -21,6 +21,43 @@ ChatRecord = Dict[str, object]
 Message = Dict[str, object]
 
 
+def _infer_image_token_repeats(model_cfg) -> int:
+    """Best-effort heuristic for matching the model's expected <image> span length."""
+
+    def _coerce_int(value) -> Optional[int]:
+        try:
+            integer = int(value)
+        except (TypeError, ValueError):
+            return None
+        return integer
+
+    for attr in ("image_token_length", "image_seq_length", "image_seq_len", "vision_token_length"):
+        value = _coerce_int(getattr(model_cfg, attr, None))
+        if value is not None and value > 0:
+            return value
+
+    vision = getattr(model_cfg, "vision", None)
+    if vision is not None:
+        num_patches = getattr(vision, "num_patches", None)
+        if not isinstance(num_patches, int):
+            num_patches = _coerce_int(num_patches)
+        if num_patches is None or num_patches <= 0:
+            image_size = _coerce_int(getattr(vision, "image_size", None))
+            patch_size = _coerce_int(getattr(vision, "patch_size", None))
+            if image_size and patch_size and patch_size > 0:
+                side = image_size // patch_size
+                num_patches = side * side
+
+        if num_patches and num_patches > 0:
+            scale = _coerce_int(getattr(model_cfg, "scale_factor", None))
+            if scale is None or scale < 1:
+                scale = 1
+            repeats = num_patches // (scale * scale)
+            return max(repeats, 1)
+
+    return 1
+
+
 @dataclass
 class ChatDataConfig:
     """Configuration describing how to stream and post-process chat data."""
@@ -203,6 +240,7 @@ class ConversationTokenizer:
         inline_sep: str = "\n",
         message_sep: str = "\n",
         append_eos_to_assistant: bool = True,
+        image_token_repeats: int = 1,
     ) -> None:
         self.tokenizer = tokenizer
         self.image_token_id = int(image_token_id)
@@ -214,6 +252,10 @@ class ConversationTokenizer:
         self.inline_sep = inline_sep
         self.message_sep = message_sep
         self.append_eos = append_eos_to_assistant
+        repeats = int(image_token_repeats)
+        if repeats < 1:
+            raise ValueError("image_token_repeats must be at least 1")
+        self.image_token_repeats = repeats
 
     def _encode(self, text: str) -> List[int]:
         tokens = self.tokenizer.encode(text, add_special_tokens=False)
@@ -238,8 +280,8 @@ class ConversationTokenizer:
             content = list(message.get("content", []))
             for idx, chunk in enumerate(content):
                 if chunk.get("type") == "image":
-                    input_ids.append(self.image_token_id)
-                    labels.append(-100)
+                    input_ids.extend([self.image_token_id] * self.image_token_repeats)
+                    labels.extend([-100] * self.image_token_repeats)
                 else:
                     text = str(chunk.get("text", ""))
                     if not text:
@@ -373,6 +415,7 @@ def build_chat_dataloader(
         bos_token_id=getattr(tokenizer, "bos_token_id", None),
         eos_token_id=getattr(tokenizer, "eos_token_id", None),
         pad_token_id=int(getattr(tokenizer, "pad_token_id", getattr(model_cfg, "pad_token_id", 0))),
+        image_token_repeats=_infer_image_token_repeats(model_cfg),
     )
     collator = ChatCollator(
         tokenizer_wrapper,
