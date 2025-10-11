@@ -4,13 +4,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Sequence
+from typing import Any, Dict, Iterable, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_safetensors
-from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase
 
 from models.smolVLM.config import SmolVLMConfig
 from models.smolVLM.model import SmolVLM
@@ -23,6 +23,7 @@ class ExperimentArtifacts:
 
     model: SmolVLM
     tokenizer: PreTrainedTokenizerBase
+    processor: Any
     model_config: SmolVLMConfig
     step_fn: StepFn
     callbacks: Sequence[TrainerCallback]
@@ -64,6 +65,13 @@ class SmolVLMSiglipExperiment:
             local_files_only=args.model_local_only,
         )
 
+        processor = AutoProcessor.from_pretrained(
+            args.model,
+            revision=args.model_revision,
+            token=args.model_token,
+            local_files_only=args.model_local_only,
+        )
+
         model = SmolVLM(model_cfg)
         state_dict = self._download_state_dict(
             args.model,
@@ -81,6 +89,7 @@ class SmolVLMSiglipExperiment:
         return ExperimentArtifacts(
             model=model,
             tokenizer=tokenizer,
+            processor=processor,
             model_config=model_cfg,
             step_fn=step_fn,
             callbacks=callbacks,
