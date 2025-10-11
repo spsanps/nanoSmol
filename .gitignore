@@ -51,6 +51,7 @@ transformers_cache/
 torch_cache/
 tokenizers_cache/
 hf_cache/
+!train/data/
 
 # Outputs & artifacts
 artifacts/
