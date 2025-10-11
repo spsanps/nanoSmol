@@ -11,7 +11,15 @@ from .data import (
     register_adapter,
     available_adapters,
 )
-from .engine import TrainingConfig, Trainer
+from .engine import (
+    ConsoleMetricLogger,
+    StepFn,
+    StepOutput,
+    Trainer,
+    TrainerCallback,
+    TrainingConfig,
+    TrainingState,
+)
 
 __all__ = [
     "ChatCollator",
@@ -23,6 +31,11 @@ __all__ = [
     "build_finevision_dataloader",
     "register_adapter",
     "available_adapters",
-    "TrainingConfig",
+    "ConsoleMetricLogger",
+    "StepFn",
+    "StepOutput",
     "Trainer",
+    "TrainerCallback",
+    "TrainingConfig",
+    "TrainingState",
 ]

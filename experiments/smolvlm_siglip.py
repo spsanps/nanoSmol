@@ -4,24 +4,28 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file as load_safetensors
 from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase
 
 from models.smolVLM.config import SmolVLMConfig
 from models.smolVLM.model import SmolVLM
+from train import ConsoleMetricLogger, StepFn, StepOutput, TrainerCallback
 
 
 @dataclass
 class ExperimentArtifacts:
-    """Bundle of objects returned by :func:`SmolVLMSiglipExperiment.build`."""
+    """Objects returned by :func:`SmolVLMSiglipExperiment.build`."""
 
     model: SmolVLM
     tokenizer: PreTrainedTokenizerBase
     model_config: SmolVLMConfig
+    step_fn: StepFn
+    callbacks: Sequence[TrainerCallback]
 
 
 class SmolVLMSiglipExperiment:
@@ -70,9 +74,44 @@ class SmolVLMSiglipExperiment:
         try:
             model.load_hf_state_dict(state_dict, strict=False, verbose=True)
         finally:
-            # Release the (potentially multi-gigabyte) checkpoint immediately.
             state_dict.clear()
-        return ExperimentArtifacts(model=model, tokenizer=tokenizer, model_config=model_cfg)
+
+        step_fn = self._build_step_fn()
+        callbacks: Sequence[TrainerCallback] = (ConsoleMetricLogger(),)
+        return ExperimentArtifacts(
+            model=model,
+            tokenizer=tokenizer,
+            model_config=model_cfg,
+            step_fn=step_fn,
+            callbacks=callbacks,
+        )
+
+    # ------------------------------------------------------------------ loss fn
+    def _build_step_fn(self) -> StepFn:
+        def step_fn(model: SmolVLM, batch: Dict[str, torch.Tensor]) -> StepOutput:
+            logits = model(
+                batch["input_ids"],
+                attention_mask=batch.get("attention_mask"),
+                pixel_values=batch.get("pixel_values"),
+                pixel_attention_mask=batch.get("pixel_attention_mask"),
+            )
+            vocab = logits.size(-1)
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = batch["labels"][:, 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, vocab),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+
+            attention = batch.get("attention_mask")
+            if attention is None:
+                attention = torch.ones_like(batch["input_ids"])
+            tokens = int(attention.sum().item())
+            samples = int(batch["input_ids"].size(0))
+            return StepOutput(loss=loss, tokens=tokens, samples=samples)
+
+        return step_fn
 
     # ----------------------------------------------------------------- weights
     def _download_state_dict(

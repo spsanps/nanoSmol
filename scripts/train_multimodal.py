@@ -1,9 +1,6 @@
-"""CLI wrapper around the modular multimodal trainer."""
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -50,8 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=1000, help="Number of optimisation steps")
     parser.add_argument("--lr", type=float, default=2e-5, help="Peak learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.0, help="AdamW weight decay")
-    parser.add_argument("--warmup", type=int, default=200, help="Linear warmup steps")
     parser.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.95), metavar=("B1", "B2"), help="Adam betas")
+    parser.add_argument("--warmup", type=int, default=200, help="Linear warmup steps")
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping (disabled if negative)")
     parser.add_argument("--num-workers", type=int, default=2, help="DataLoader worker processes")
     parser.add_argument("--compile", action="store_true", help="Torch compile the model")
@@ -62,42 +59,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["no", "fp16", "bf16"],
         help="Accelerate mixed precision mode",
     )
-    parser.add_argument("--log-dir", type=Path, default=Path("artifacts/train"), help="Directory for logs + plots")
-    parser.add_argument("--wandb-project", type=str, default=None, help="Weights & Biases project name")
-    parser.add_argument("--wandb-run", type=str, default=None, help="Weights & Biases run name")
-    parser.add_argument("--wandb-group", type=str, default=None, help="Weights & Biases group name")
-    parser.add_argument("--resume-wandb", action="store_true", help="Resume an existing Weights & Biases run")
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("artifacts/checkpoints"), help="Folder for training checkpoints")
+    parser.add_argument("--log-every", type=int, default=10, help="Steps between console logs")
     parser.add_argument(
-        "--checkpoint-interval",
-        type=int,
-        default=None,
-        help="Steps between checkpoints (overrides --num-checkpoints)",
-    )
-    parser.add_argument("--num-checkpoints", type=int, default=10, help="Target number of checkpoints across the run")
-    parser.add_argument(
-        "--checkpoint-limit",
-        type=int,
-        default=None,
-        help="Maximum checkpoints to retain (oldest pruned)",
-    )
-    parser.add_argument(
-        "--final-model-dir",
+        "--save-final",
         type=Path,
-        default=Path("artifacts/final-model"),
-        help="Directory for the exported final model",
+        default=None,
+        help="Optional directory to store the trained model weights",
     )
-    parser.add_argument("--hub-model-id", type=str, default=None, help="Hugging Face repository to push the final model to")
-    parser.add_argument("--hub-branch", type=str, default=None, help="Hugging Face branch/revision for uploads")
-    parser.add_argument("--hub-private", action="store_true", help="Create the Hugging Face repo as private")
-    parser.add_argument("--hub-token", type=str, default=None, help="Hugging Face user token (uses env token if omitted)")
-    parser.add_argument(
-        "--hub-commit-message",
-        type=str,
-        default="Add trained weights",
-        help="Commit message when pushing to Hugging Face",
-    )
-    parser.add_argument("--push-to-hub", action="store_true", help="Upload the final model to Hugging Face after training")
     return parser
 
 
@@ -115,6 +83,20 @@ def parse_args() -> Tuple[argparse.Namespace, object]:
         parser.error("--dataset must be provided either explicitly or via the experiment defaults")
 
     return args, experiment
+
+
+def maybe_save_final_model(model, tokenizer, output_dir: Optional[Path]) -> None:
+    if output_dir is None:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_pretrained = getattr(model, "save_pretrained", None)
+    if callable(save_pretrained):
+        save_pretrained(output_dir, safe_serialization=True)
+    else:
+        torch.save(model.state_dict(), output_dir / "pytorch_model.bin")
+    save_tokenizer = getattr(tokenizer, "save_pretrained", None)
+    if callable(save_tokenizer):
+        save_tokenizer(output_dir)
 
 
 def main() -> None:
@@ -141,30 +123,12 @@ def main() -> None:
     train_cfg = TrainingConfig(
         max_steps=args.max_steps,
         grad_accum_steps=args.grad_accum,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        betas=tuple(args.betas),
+        learning_rate=args.lr,
         warmup_steps=args.warmup,
         max_grad_norm=None if args.max_grad_norm < 0 else args.max_grad_norm,
         compile_model=args.compile,
-        log_every=10,
-        log_dir=str(args.log_dir) if args.log_dir else None,
+        log_every=args.log_every,
         mixed_precision=args.mixed_precision,
-        wandb_project=args.wandb_project,
-        wandb_run_name=args.wandb_run,
-        wandb_group=args.wandb_group,
-        resume_wandb=args.resume_wandb,
-        checkpoint_dir=str(args.checkpoint_dir) if args.checkpoint_dir else None,
-        checkpoint_interval=args.checkpoint_interval,
-        num_checkpoints=args.num_checkpoints,
-        checkpoint_total_limit=args.checkpoint_limit,
-        final_model_dir=str(args.final_model_dir) if args.final_model_dir else None,
-        hub_model_id=args.hub_model_id,
-        hub_revision=args.hub_branch,
-        hub_token=args.hub_token,
-        hub_private=args.hub_private,
-        hub_commit_message=args.hub_commit_message,
-        hub_push_final=args.push_to_hub,
     )
 
     dataloader = build_chat_dataloader(
@@ -177,13 +141,23 @@ def main() -> None:
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=train_cfg.lr,
-        betas=train_cfg.betas,
-        weight_decay=train_cfg.weight_decay,
+        lr=train_cfg.learning_rate,
+        betas=tuple(args.betas),
+        weight_decay=args.weight_decay,
     )
 
-    trainer = Trainer(model, optimizer, dataloader, train_cfg, tokenizer=tokenizer)
+    callbacks = list(artifacts.callbacks)
+    trainer = Trainer(
+        model,
+        optimizer,
+        dataloader,
+        train_cfg,
+        artifacts.step_fn,
+        callbacks=callbacks,
+    )
     trainer.train()
+
+    maybe_save_final_model(model, tokenizer, args.save_final)
 
 
 if __name__ == "__main__":
