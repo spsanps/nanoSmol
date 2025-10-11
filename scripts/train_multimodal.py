@@ -104,6 +104,7 @@ def main() -> None:
     artifacts = experiment.build(args)
     model = artifacts.model
     tokenizer = artifacts.tokenizer
+    processor = artifacts.processor
     model_cfg = artifacts.model_config
 
     data_cfg = ChatDataConfig(
@@ -137,6 +138,7 @@ def main() -> None:
         model_cfg=model_cfg,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        processor=processor,
     )
 
     optimizer = torch.optim.AdamW(
