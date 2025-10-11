@@ -16,15 +16,20 @@ Experiment quickly with VLMs (Vision+Language Models) in a minimal codebase whil
 
 ## Multimodal training loop
 
-The ``train`` package now exposes two intentionally tiny modules:
+The ``train`` package is intentionally chopped into one-screen modules so you
+can read each piece without scrolling:
 
-- ``train.data`` contains reusable dataset pieces – a registry of adapters,
-  a conversation-aware tokenizer, and a collator that keeps tensors dense while
-  masking out user tokens (NanoGPT style).
-- ``train.engine`` wraps ``accelerate`` so the exact same training loop scales
-  from laptops to multi-GPU rigs.  It tracks throughput, writes JSON logs, draws
-  a ``matplotlib`` curve, and (optionally) streams everything to Weights &
-  Biases.
+- ``train.data.config`` → the dataset dataclass that declares how to stream and
+  filter conversations.
+- ``train.data.adapters`` → a tiny registry that turns raw HF records into
+  user/assistant message transcripts.
+- ``train.data.tokenizer`` → converts transcripts into ``input_ids`` and
+  ``labels`` while inserting image tokens the same way NanoGPT injects BOS/EOS.
+- ``train.data.collator`` → pads text, normalises images, and produces dense
+  tensors ready for the model.
+- ``train.data.loader`` → glues everything together into a ``DataLoader``.
+- ``train.engine`` → the accelerate-powered training loop that scales from a
+  laptop GPU to multi-node runs.
 
 FineVision is just the default adapter; to fine-tune a Hugging Face
 ``SmolVLM`` checkpoint you can run:
