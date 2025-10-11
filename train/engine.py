@@ -7,7 +7,6 @@ from typing import Callable, Dict, Iterable, Iterator, List, MutableMapping, Opt
 
 import torch
 from torch import nn
-from torch.nn.utils import clip_grad_norm_
 
 try:  # accelerate is optional for documentation builds
     from accelerate import Accelerator
@@ -235,7 +234,9 @@ class Trainer:
             if self.accelerator.sync_gradients:
                 self.state.step += 1
                 if self.cfg.max_grad_norm is not None:
-                    clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
+                    self.accelerator.clip_grad_norm_(
+                        self.model.parameters(), self.cfg.max_grad_norm
+                    )
                 scale = _warmup_factor(self.state.step, self.cfg.warmup_steps)
                 for group in self.optimizer.param_groups:
                     base_lr = group.get("base_lr", self.cfg.learning_rate)

@@ -27,6 +27,9 @@ class DummyAccelerator:
     def backward(self, loss):
         loss.backward()
 
+    def clip_grad_norm_(self, parameters, max_norm):
+        torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+
     def gather(self, tensor):
         return tensor.detach()
 
