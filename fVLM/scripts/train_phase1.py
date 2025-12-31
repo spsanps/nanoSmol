@@ -98,15 +98,30 @@ def train(config_path):
     print("\n📦 Creating DataLoader...", flush=True)
     import sys
     sys.stdout.flush()
-    dataloader = create_dataloader(
-        video_dir=config['data']['video_dir'],
-        latent_dir=config['data']['latent_dir'],
-        batch_size=config['training']['batch_size'],
-        num_workers=0,  # WSL multiprocessing issue - use 0 for main process loading
-        shuffle=True,
-        num_frames=config['data']['num_frames'],
-        frame_size=config['data']['frame_size'],
-    )
+    # Try num_workers=1 for better throughput (WSL compatibility)
+    # Falls back to 0 if multiprocessing fails
+    try:
+        dataloader = create_dataloader(
+            video_dir=config['data']['video_dir'],
+            latent_dir=config['data']['latent_dir'],
+            batch_size=config['training']['batch_size'],
+            num_workers=1,  # Try 1 worker - fallback to 0 if it hangs
+            shuffle=True,
+            num_frames=config['data']['num_frames'],
+            frame_size=config['data']['frame_size'],
+        )
+        print(f"   Using num_workers=1 with prefetching")
+    except Exception as e:
+        print(f"   Multiprocessing failed ({e}), falling back to num_workers=0")
+        dataloader = create_dataloader(
+            video_dir=config['data']['video_dir'],
+            latent_dir=config['data']['latent_dir'],
+            batch_size=config['training']['batch_size'],
+            num_workers=0,
+            shuffle=True,
+            num_frames=config['data']['num_frames'],
+            frame_size=config['data']['frame_size'],
+        )
     print(f"   Dataset size: {len(dataloader.dataset)}")
     print(f"   Batches per epoch: {len(dataloader)}")
     print(f"   Effective batch size: {config['training']['batch_size'] * config['training']['grad_accum']}")

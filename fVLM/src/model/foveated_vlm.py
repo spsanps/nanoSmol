@@ -122,10 +122,19 @@ class FoveatedVideoModel(nn.Module):
         N_text = text_embeds.shape[1]
 
         # === Encode all frames with DINO, cache features ===
+        # Batch process all frames at once for efficiency
+        frames_flat = raw_frames.reshape(B * T, 3, 256, 256)  # [B*T, 3, 256, 256]
+        _, cache_flat = self.encoder.encode_patches(frames_flat)
+
+        # Reshape cache back to [B, T, N, D]
+        patch_features_flat = cache_flat['patch_features']  # [B*T, N, D]
+        N, D = patch_features_flat.shape[1], patch_features_flat.shape[2]
+        patch_features = patch_features_flat.reshape(B, T, N, D)  # [B, T, N, D]
+
+        # Create per-frame caches for query_attend
         all_caches = []
         for t in range(T):
-            _, cache = self.encoder.encode_patches(raw_frames[:, t])
-            all_caches.append(cache)
+            all_caches.append({'patch_features': patch_features[:, t]})  # [B, N, D]
 
         # === Pass 1: Query Planning with q_static ===
         q_static = self.q_static.expand(B, -1)  # [B, query_dim]
