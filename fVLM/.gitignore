@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data (large files)
+data/videos/
+data/latents/
+data/llava_video/
+
+# Model checkpoints
+outputs/checkpoints/
+*.pt
+*.pth
+*.safetensors
+
+# Logs
+outputs/logs/
+wandb/
+*.log
+
+# Environment
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# MacOS
+.DS_Store
+
+# Temporary
+*.tmp
+*.bak

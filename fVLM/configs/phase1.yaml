@@ -1,0 +1,39 @@
+# Phase 1: Self-Supervised Next-Frame Prediction
+# Conservative memory settings for RTX 4090
+
+data:
+  num_frames: 8
+  frame_size: 256
+  video_dir: "data/videos"
+  latent_dir: "data/latents"
+  caption_json: null  # Phase 1: no text conditioning
+
+model:
+  dino_model: "facebook/dinov2-small"
+  llm_model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  vae_model: "stabilityai/sd-vae-ft-mse"
+  dino_dim: 384
+  llm_dim: 576
+  query_dim: 384
+  lambda_coarse: 1.0  # Auxiliary loss weight
+
+training:
+  batch_size: 2         # Conservative for 4090
+  grad_accum: 4         # Effective batch = 8
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_steps: 50000
+  grad_clip: 1.0
+
+precision:
+  dtype: "bfloat16"
+  grad_checkpoint: false  # Enable if OOM
+
+logging:
+  log_every: 100
+  save_every: 5000
+  eval_every: 1000
+  output_dir: "outputs"
+  wandb_project: "foveated-vlm"
+  wandb_entity: null
