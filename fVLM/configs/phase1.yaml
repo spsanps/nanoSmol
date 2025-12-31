@@ -18,8 +18,8 @@ model:
   lambda_coarse: 1.0  # Auxiliary loss weight
 
 training:
-  batch_size: 2         # Conservative for 4090
-  grad_accum: 4         # Effective batch = 8
+  batch_size: 6         # Aggressive - use more GPU!
+  grad_accum: 2         # Effective batch = 12
   learning_rate: 1.0e-4
   weight_decay: 0.01
   warmup_steps: 500

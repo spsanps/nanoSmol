@@ -95,12 +95,14 @@ def train(config_path):
     setup_wandb(config)
 
     # Create DataLoader
-    print("\n📦 Creating DataLoader...")
+    print("\n📦 Creating DataLoader...", flush=True)
+    import sys
+    sys.stdout.flush()
     dataloader = create_dataloader(
         video_dir=config['data']['video_dir'],
         latent_dir=config['data']['latent_dir'],
         batch_size=config['training']['batch_size'],
-        num_workers=4,
+        num_workers=0,  # WSL multiprocessing issue - use 0 for main process loading
         shuffle=True,
         num_frames=config['data']['num_frames'],
         frame_size=config['data']['frame_size'],
@@ -110,7 +112,8 @@ def train(config_path):
     print(f"   Effective batch size: {config['training']['batch_size'] * config['training']['grad_accum']}")
 
     # Create model
-    print("\n📦 Creating model...")
+    print("\n📦 Creating model...", flush=True)
+    sys.stdout.flush()
     model = FoveatedVideoModel(
         dino_model=config['model']['dino_model'],
         llm_model=config['model']['llm_model'],
