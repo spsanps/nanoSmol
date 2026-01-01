@@ -1,0 +1,50 @@
+# Phase 2: Text-Conditioned Training
+# Action-rich videos with captions for guided attention
+
+data:
+  dataset: "llava_video"  # LLaVA-Video-178K academic subset
+  num_frames: 16          # Memory efficient while still capturing motion
+  frame_size: 256
+  fps_mode: "uniform"     # Consistent temporal sampling
+  min_duration: 5         # seconds
+  max_duration: 30        # 0-30s academic subset
+  use_text: true          # Enable text conditioning
+  max_text_tokens: 64     # Truncate long captions
+  streaming_vae: true     # Compute VAE latents on-the-fly (no preprocessing)
+
+model:
+  dino_model: "facebook/dinov2-small"
+  llm_model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  dino_dim: 384
+  llm_dim: 576
+  query_dim: 384
+  lambda_coarse: 1.0
+  deep_query: false       # Start with shallow mode
+
+training:
+  batch_size: 4           # Memory-safe batch
+  grad_accum: 4           # Effective batch = 16
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_steps: 12000        # ~16 epochs, ~4 hours
+  grad_clip: 1.0
+
+  # Phase 2 specific
+  text_conditioning: true
+  freeze_dino: false      # Fine-tune DINO for motion
+  freeze_llm: false       # Fine-tune LLM for temporal reasoning
+
+logging:
+  log_every: 100
+  save_every: 2000
+  output_dir: "outputs/phase2"
+  wandb_project: "foveated-vlm"
+  wandb_entity: null
+  run_name: "phase2_text_motion"
+
+# Attention analysis
+analysis:
+  log_attention_entropy: true
+  save_attention_maps: true  # Periodically save for visualization
+  attention_sample_every: 1000
