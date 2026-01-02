@@ -31,10 +31,21 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
+import time
+
 def parse_duration(dur_str):
-    match = re.match(r'PT(\d+)H(\d+)M(\d+)S', dur_str)
-    if match:
-        return int(match[1]) * 3600 + int(match[2]) * 60 + int(match[3])
+    try:
+        match = re.match(r'PT(\d+)H(\d+)M(\d+)S', dur_str)
+        if match:
+            return int(match[1]) * 3600 + int(match[2]) * 60 + int(match[3])
+        match = re.match(r'PT(\d+)M(\d+)S', dur_str)
+        if match:
+            return int(match[1]) * 60 + int(match[2])
+        match = re.match(r'PT(\d+)S', dur_str)
+        if match:
+            return int(match[1])
+    except:
+        pass
     return 0
 
 
@@ -82,9 +93,22 @@ def download_video(url, num_frames=16, frame_size=256):
 
 
 def get_test_videos(num_videos=8, num_frames=16, frame_size=256):
-    """Download test videos from WebVid."""
+    """Download test videos from WebVid with retry logic."""
     print(f"Downloading {num_videos} test videos...")
-    ds = load_dataset('TempoFunk/webvid-10M', split='train', streaming=True)
+
+    # Retry dataset loading with exponential backoff
+    for retry in range(5):
+        try:
+            ds = load_dataset('TempoFunk/webvid-10M', split='train', streaming=True)
+            break
+        except Exception as e:
+            if retry < 4:
+                wait = 2 ** retry
+                print(f"  Dataset load failed (attempt {retry+1}/5), waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"  Failed to load dataset after 5 attempts: {e}")
+                return []
 
     videos = []
     tried = 0
@@ -92,7 +116,7 @@ def get_test_videos(num_videos=8, num_frames=16, frame_size=256):
         if len(videos) >= num_videos:
             break
 
-        duration = parse_duration(sample['duration'])
+        duration = parse_duration(sample.get('duration', ''))
         if duration < 8 or duration > 60:
             continue
 
@@ -101,12 +125,13 @@ def get_test_videos(num_videos=8, num_frames=16, frame_size=256):
         if frames is not None:
             videos.append({
                 'frames': frames,
-                'caption': sample['name'],
-                'video_id': sample['videoid']
+                'caption': sample.get('name', 'Unknown'),
+                'video_id': sample.get('videoid', f'video_{len(videos)}')
             })
-            print(f"  Downloaded {len(videos)}/{num_videos}")
+            print(f"  [{len(videos)}/{num_videos}] {sample.get('name', '')[:50]}...")
 
-        if tried > num_videos * 5:
+        if tried > num_videos * 10:
+            print(f"  Reached max tries ({tried}), got {len(videos)} videos")
             break
 
     return videos
@@ -287,10 +312,10 @@ def create_attention_overlay(frame, attn_map, alpha=0.4, normalize_mode='absolut
     return overlaid, attn_norm
 
 
-def create_attention_grid(frames, coarse_attn, fine_attn, output_path):
+def create_attention_grid(frames, coarse_attn, fine_attn, output_path, caption=""):
     """
     Create a grid showing: Frame | Coarse Attention | Fine Attention | Difference
-    for each timestep.
+    for each timestep, with caption.
     """
     T = frames.shape[0]
 
@@ -303,19 +328,19 @@ def create_attention_grid(frames, coarse_attn, fine_attn, output_path):
 
         # Original frame
         axes[t, 0].imshow(frame.permute(1, 2, 0).numpy())
-        axes[t, 0].set_title(f'Frame {t}')
+        axes[t, 0].set_title(f'Frame {t}', fontsize=10, fontweight='bold')
         axes[t, 0].axis('off')
 
         # Coarse attention overlay (relative normalization to see structure)
         coarse_overlay, _ = create_attention_overlay(frame, coarse, normalize_mode='relative')
         axes[t, 1].imshow(coarse_overlay)
-        axes[t, 1].set_title(f'Coarse (static) t={t}')
+        axes[t, 1].set_title(f'Coarse (static) t={t}', fontsize=10, color='blue')
         axes[t, 1].axis('off')
 
         # Fine attention overlay (relative normalization)
         fine_overlay, _ = create_attention_overlay(frame, fine, normalize_mode='relative')
         axes[t, 2].imshow(fine_overlay)
-        axes[t, 2].set_title(f'Fine (dynamic) t={t}')
+        axes[t, 2].set_title(f'Fine (dynamic) t={t}', fontsize=10, color='red')
         axes[t, 2].axis('off')
 
         # Difference: Fine - Coarse (raw heatmap, no frame overlay for clarity)
@@ -334,15 +359,18 @@ def create_attention_grid(frames, coarse_attn, fine_attn, output_path):
 
         # Use diverging colormap: blue = fine attends less, red = fine attends more
         im = axes[t, 3].imshow(diff_norm, cmap='RdBu_r', vmin=-1, vmax=1)
-        axes[t, 3].set_title(f'Fine - Coarse (normalized) t={t}')
+        axes[t, 3].set_title(f'Difference t={t}', fontsize=10, color='green')
         axes[t, 3].axis('off')
 
         # Add colorbar for first frame only
         if t == 0:
             cbar = plt.colorbar(im, ax=axes[t, 3], fraction=0.046)
-            cbar.set_label('Attention Difference')
+            cbar.set_label('Fine - Coarse')
 
-    plt.tight_layout()
+    # Add caption as super title
+    caption_short = caption[:120] + "..." if len(caption) > 120 else caption
+    plt.suptitle(f'Caption: "{caption_short}"', fontsize=11, y=0.995, style='italic')
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -359,8 +387,9 @@ def create_attention_gif(frames, attn_maps, output_path, title="Attention", fps=
     imageio.mimsave(output_path, gif_frames, fps=fps, loop=0)
 
 
-def create_comparison_gif(frames, coarse_attn, fine_attn, output_path, fps=4):
-    """Create side-by-side GIF: Original | Coarse | Fine | Diff"""
+def create_comparison_gif(frames, coarse_attn, fine_attn, output_path, caption="", fps=4):
+    """Create side-by-side GIF: Original | Coarse | Fine | Diff with labels"""
+    from PIL import Image as PILImage, ImageDraw, ImageFont
     T = frames.shape[0]
 
     gif_frames = []
@@ -389,31 +418,61 @@ def create_comparison_gif(frames, coarse_attn, fine_attn, output_path, fps=4):
         diff_colored = cmap((diff_norm + 1) / 2)[:, :, :3]  # Map [-1,1] to [0,1]
         diff_overlay = (diff_colored * 255).astype(np.uint8)
 
-        # Add labels
-        label_h = 25
+        # Layout with header and footer for labels
+        header_h = 30
+        footer_h = 25
 
-        combined = np.zeros((H + label_h, W * 4, 3), dtype=np.uint8)
-        combined[label_h:, :W] = frame.permute(1, 2, 0).numpy()
-        combined[label_h:, W:2*W] = coarse_overlay
-        combined[label_h:, 2*W:3*W] = fine_overlay
-        combined[label_h:, 3*W:] = diff_overlay
+        combined = np.zeros((H + header_h + footer_h, W * 4, 3), dtype=np.uint8)
+        combined[header_h:header_h+H, :W] = frame.permute(1, 2, 0).numpy()
+        combined[header_h:header_h+H, W:2*W] = coarse_overlay
+        combined[header_h:header_h+H, 2*W:3*W] = fine_overlay
+        combined[header_h:header_h+H, 3*W:] = diff_overlay
 
         # Add colored headers
-        combined[:label_h, :W] = [80, 80, 80]        # Gray for original
-        combined[:label_h, W:2*W] = [50, 50, 150]    # Blue for coarse
-        combined[:label_h, 2*W:3*W] = [150, 50, 50]  # Red for fine
-        combined[:label_h, 3*W:] = [50, 150, 50]     # Green for diff
+        combined[:header_h, :W] = [60, 60, 60]        # Gray for original
+        combined[:header_h, W:2*W] = [40, 40, 120]    # Blue for coarse
+        combined[:header_h, 2*W:3*W] = [120, 40, 40]  # Red for fine
+        combined[:header_h, 3*W:] = [40, 100, 40]     # Green for diff
 
-        gif_frames.append(combined)
+        # Footer for caption
+        combined[-footer_h:, :] = [30, 30, 30]
+
+        # Convert to PIL to add text
+        img = PILImage.fromarray(combined)
+        draw = ImageDraw.Draw(img)
+
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+        except:
+            font = ImageFont.load_default()
+            font_small = font
+
+        # Draw column labels
+        labels = [f"Frame {t}", "Coarse (static)", "Fine (dynamic)", "Difference"]
+        for i, label in enumerate(labels):
+            x = i * W + W // 2 - len(label) * 4
+            draw.text((x, 8), label, fill=(255, 255, 255), font=font)
+
+        # Draw caption at bottom
+        caption_short = caption[:100] + "..." if len(caption) > 100 else caption
+        draw.text((10, H + header_h + 5), caption_short, fill=(200, 200, 200), font=font_small)
+
+        gif_frames.append(np.array(img))
 
     imageio.mimsave(output_path, gif_frames, fps=fps, loop=0)
 
 
-def plot_attention_stats(coarse_attn, fine_attn, output_path):
+def plot_attention_stats(coarse_attn, fine_attn, output_path, caption=""):
     """Plot attention statistics over time."""
     T = coarse_attn.shape[0]
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Add caption as super title
+    if caption:
+        caption_short = caption[:100] + "..." if len(caption) > 100 else caption
+        fig.suptitle(f'"{caption_short}"', fontsize=10, style='italic', y=0.98)
 
     # Entropy over time (higher = more distributed attention)
     coarse_entropy = []
@@ -486,7 +545,7 @@ def plot_attention_stats(coarse_attn, fine_attn, output_path):
     axes[1, 1].scatter([coarse_cx[0]], [coarse_cy[0]], c='blue', s=100, marker='s', zorder=5)
     axes[1, 1].scatter([fine_cx[0]], [fine_cy[0]], c='red', s=100, marker='s', zorder=5)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Leave room for suptitle
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -494,9 +553,9 @@ def plot_attention_stats(coarse_attn, fine_attn, output_path):
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     num_frames = 16
-    num_examples = 10  # More examples for diversity
+    num_examples = 30  # More examples for diversity
 
-    output_dir = Path('outputs/attention')
+    output_dir = Path('outputs/attention_30')
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load model
@@ -535,17 +594,21 @@ def main():
             model, frames, device
         )
 
+        caption = video['caption']
+
         # Create visualizations
         # 1. Grid of all frames with attention
         create_attention_grid(
             frames, coarse_attn, fine_attn,
-            output_dir / f'grid_{i:02d}.png'
+            output_dir / f'grid_{i:02d}.png',
+            caption=caption
         )
 
-        # 2. Comparison GIF
+        # 2. Comparison GIF with labels
         create_comparison_gif(
             frames, coarse_attn, fine_attn,
-            output_dir / f'comparison_{i:02d}.gif'
+            output_dir / f'comparison_{i:02d}.gif',
+            caption=caption
         )
 
         # 3. Individual attention GIFs
@@ -563,7 +626,8 @@ def main():
         # 4. Attention statistics
         plot_attention_stats(
             coarse_attn, fine_attn,
-            output_dir / f'stats_{i:02d}.png'
+            output_dir / f'stats_{i:02d}.png',
+            caption=caption
         )
 
         # Print summary

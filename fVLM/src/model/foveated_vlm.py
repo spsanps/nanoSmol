@@ -94,6 +94,9 @@ class FoveatedVideoModel(nn.Module):
         # Learnable "no text" token for Phase 1 (self-supervised)
         self.no_text_token = nn.Parameter(torch.randn(1, 1, llm_dim) * 0.14)
 
+        # Video end token for captioning (signals transition to text generation)
+        self.video_end_token = nn.Parameter(torch.randn(1, 1, llm_dim) * 0.14)
+
     def get_empty_text_embeds(self, batch_size: int) -> torch.Tensor:
         """
         Get empty text embeddings for Phase 1 (self-supervised).
@@ -252,6 +255,284 @@ class FoveatedVideoModel(nn.Module):
         loss = loss_fine + self.lambda_coarse * loss_coarse
 
         return loss, loss_fine, loss_coarse
+
+    def forward_captioning(
+        self,
+        raw_frames: torch.Tensor,
+        caption_ids: torch.Tensor,
+        caption_mask: torch.Tensor,
+        use_fine: bool = True,
+    ) -> torch.Tensor:
+        """
+        Forward pass for captioning training.
+
+        Args:
+            raw_frames: [B, T, 3, 256, 256] video frames (ImageNet normalized)
+            caption_ids: [B, L] tokenized caption (target)
+            caption_mask: [B, L] attention mask for caption
+            use_fine: Use fine (dynamic) queries vs coarse (static)
+
+        Returns:
+            loss: Cross-entropy loss on caption tokens
+        """
+        B, T = raw_frames.shape[:2]
+        L = caption_ids.shape[1]
+        device = raw_frames.device
+
+        # Encode all frames with DINO
+        frames_flat = raw_frames.reshape(B * T, 3, 256, 256)
+        _, cache_flat = self.encoder.encode_patches(frames_flat)
+
+        patch_features_flat = cache_flat['patch_features']
+        N, D = patch_features_flat.shape[1], patch_features_flat.shape[2]
+        patch_features = patch_features_flat.reshape(B, T, N, D)
+
+        # Create per-frame caches
+        all_caches = [{'patch_features': patch_features[:, t]} for t in range(T)]
+
+        if use_fine:
+            # Two-pass encoding
+            q_static = self.q_static.expand(B, -1)
+            z_coarse_list = [self.encoder.query_attend(q_static, all_caches[t]) for t in range(T)]
+            z_coarse = torch.stack(z_coarse_list, dim=1)
+            z_coarse = self.dino_to_llm(z_coarse)
+            z_coarse = z_coarse / (z_coarse.std() + 1e-6) * self.visual_scale
+
+            # Get queries from LLM
+            coarse_token = self.coarse_token.expand(B, -1, -1)
+            no_text = self.no_text_token.expand(B, -1, -1)
+            seq_pass1 = torch.cat([no_text, coarse_token, z_coarse], dim=1)
+            outputs_pass1 = self.llm.model(inputs_embeds=seq_pass1)
+            h_pass1 = outputs_pass1.last_hidden_state
+            queries = self.llm_to_query(h_pass1[:, 2:])
+
+            # Fine pass with shifted queries
+            q_init = self.q_init.expand(B, -1).unsqueeze(1)
+            shifted_q = torch.cat([q_init, queries[:, :-1]], dim=1)
+            z_visual_list = [self.encoder.query_attend(shifted_q[:, t], all_caches[t]) for t in range(T)]
+            z_visual = torch.stack(z_visual_list, dim=1)
+        else:
+            q_static = self.q_static.expand(B, -1)
+            z_visual_list = [self.encoder.query_attend(q_static, all_caches[t]) for t in range(T)]
+            z_visual = torch.stack(z_visual_list, dim=1)
+
+        # Project to LLM space
+        z_visual = self.dino_to_llm(z_visual)
+        z_visual = z_visual / (z_visual.std() + 1e-6) * self.visual_scale
+
+        # Get caption embeddings (teacher forcing)
+        caption_embeds = self.llm.get_input_embeddings()(caption_ids)  # [B, L, llm_dim]
+
+        # Build sequence: [<fine/coarse>, z_1, ..., z_T, <video_end>, caption_tokens]
+        mode_token = self.fine_token if use_fine else self.coarse_token
+        mode_token = mode_token.expand(B, -1, -1)
+        video_end = self.video_end_token.expand(B, -1, -1)
+
+        seq = torch.cat([mode_token, z_visual, video_end, caption_embeds], dim=1)
+        # seq shape: [B, 1 + T + 1 + L, llm_dim]
+
+        # LLM forward
+        outputs = self.llm.model(inputs_embeds=seq)
+        hidden = outputs.last_hidden_state  # [B, 1 + T + 1 + L, llm_dim]
+
+        # Get logits for caption positions (after video_end token)
+        # Positions: mode(1) + visual(T) + video_end(1) + caption(L)
+        # We predict caption[1:] from positions [1+T+1 : 1+T+1+L-1]
+        caption_start = 1 + T + 1
+        h_for_caption = hidden[:, caption_start-1:-1, :]  # [B, L, llm_dim]
+        logits = self.llm.lm_head(h_for_caption)  # [B, L, vocab_size]
+
+        # Cross-entropy loss
+        # Sequence: [mode, z_1..z_T, video_end, cap_0..cap_{L-1}]
+        # hidden[T+1] (video_end position) predicts cap_0
+        # hidden[T+2] (cap_0 position) predicts cap_1
+        # ...
+        # So logits[:, i] directly predicts caption_ids[:, i]
+
+        # SmolLM2 uses pad_token_id=2 (same as eos)
+        pad_token_id = 2
+
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            caption_ids.reshape(-1),
+            ignore_index=pad_token_id,
+            reduction='mean'
+        )
+
+        return loss
+
+    @torch.no_grad()
+    def encode_video(self, raw_frames: torch.Tensor, use_fine: bool = True) -> torch.Tensor:
+        """
+        Encode video frames to visual embeddings for captioning.
+
+        Args:
+            raw_frames: [B, T, 3, 256, 256] video frames (ImageNet normalized)
+            use_fine: If True, use fine (dynamic) queries; else use coarse (static)
+
+        Returns:
+            z_visual: [B, T, llm_dim] visual embeddings ready for LLM
+        """
+        B, T = raw_frames.shape[:2]
+
+        # Encode all frames with DINO
+        frames_flat = raw_frames.reshape(B * T, 3, 256, 256)
+        _, cache_flat = self.encoder.encode_patches(frames_flat)
+
+        patch_features_flat = cache_flat['patch_features']
+        N, D = patch_features_flat.shape[1], patch_features_flat.shape[2]
+        patch_features = patch_features_flat.reshape(B, T, N, D)
+
+        # Create per-frame caches
+        all_caches = []
+        for t in range(T):
+            all_caches.append({'patch_features': patch_features[:, t]})
+
+        if use_fine:
+            # Two-pass: first get queries from coarse pass, then use them
+            q_static = self.q_static.expand(B, -1)
+            z_coarse_list = []
+            for t in range(T):
+                z_t = self.encoder.query_attend(q_static, all_caches[t])
+                z_coarse_list.append(z_t)
+            z_coarse = torch.stack(z_coarse_list, dim=1)
+            z_coarse = self.dino_to_llm(z_coarse)
+            z_coarse = z_coarse / (z_coarse.std() + 1e-6) * self.visual_scale
+
+            # Get queries from LLM
+            coarse_token = self.coarse_token.expand(B, -1, -1)
+            no_text = self.no_text_token.expand(B, -1, -1)
+            seq_pass1 = torch.cat([no_text, coarse_token, z_coarse], dim=1)
+            outputs_pass1 = self.llm.model(inputs_embeds=seq_pass1)
+            h_pass1 = outputs_pass1.last_hidden_state
+            h_for_queries = h_pass1[:, 2:]  # After no_text and coarse_token
+            queries = self.llm_to_query(h_for_queries)
+
+            # Use shifted queries for fine pass
+            q_init = self.q_init.expand(B, -1).unsqueeze(1)
+            shifted_q = torch.cat([q_init, queries[:, :-1]], dim=1)
+
+            z_focused_list = []
+            for t in range(T):
+                z_t = self.encoder.query_attend(shifted_q[:, t], all_caches[t])
+                z_focused_list.append(z_t)
+            z_visual = torch.stack(z_focused_list, dim=1)
+        else:
+            # Just use coarse (static query)
+            q_static = self.q_static.expand(B, -1)
+            z_coarse_list = []
+            for t in range(T):
+                z_t = self.encoder.query_attend(q_static, all_caches[t])
+                z_coarse_list.append(z_t)
+            z_visual = torch.stack(z_coarse_list, dim=1)
+
+        # Project to LLM space
+        z_visual = self.dino_to_llm(z_visual)
+        z_visual = z_visual / (z_visual.std() + 1e-6) * self.visual_scale
+
+        return z_visual
+
+    @torch.no_grad()
+    def generate_caption(
+        self,
+        raw_frames: torch.Tensor,
+        tokenizer,
+        max_new_tokens: int = 50,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        use_fine: bool = True,
+    ) -> list:
+        """
+        Generate captions from video frames.
+
+        Args:
+            raw_frames: [B, T, 3, 256, 256] video frames (ImageNet normalized)
+            tokenizer: HuggingFace tokenizer for decoding
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature (lower = more deterministic)
+            top_p: Nucleus sampling threshold
+            use_fine: Use fine (dynamic) queries vs coarse (static)
+
+        Returns:
+            captions: List of generated caption strings
+        """
+        B = raw_frames.shape[0]
+        device = raw_frames.device
+
+        # Enable cache for generation (disabled during training)
+        orig_use_cache = self.llm.config.use_cache
+        self.llm.config.use_cache = True
+
+        # Encode video
+        z_visual = self.encode_video(raw_frames, use_fine=use_fine)
+
+        # Build sequence: [<fine>, z_1, ..., z_T, <video_end>]
+        mode_token = self.fine_token if use_fine else self.coarse_token
+        mode_token = mode_token.expand(B, -1, -1)
+        video_end = self.video_end_token.expand(B, -1, -1)
+
+        # Initial sequence
+        seq = torch.cat([mode_token, z_visual, video_end], dim=1)
+
+        # Get initial hidden states AND cache
+        outputs = self.llm.model(inputs_embeds=seq)
+        hidden = outputs.last_hidden_state
+        past_key_values = outputs.past_key_values  # Save cache from video encoding!
+
+        # Autoregressive generation
+        generated_ids = []
+
+        for _ in range(max_new_tokens):
+            # Get logits from last position
+            if past_key_values is None:
+                logits = self.llm.lm_head(hidden[:, -1:, :])
+            else:
+                logits = self.llm.lm_head(hidden)
+
+            logits = logits[:, -1, :] / temperature
+
+            # Top-p sampling
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+            sorted_indices_to_remove[:, 0] = False
+
+            for b in range(B):
+                logits[b, sorted_indices[b, sorted_indices_to_remove[b]]] = float('-inf')
+
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            generated_ids.append(next_token)
+
+            # Check for EOS
+            if (next_token == tokenizer.eos_token_id).all():
+                break
+
+            # Get embedding for next token and continue
+            next_embed = self.llm.get_input_embeddings()(next_token)
+            outputs = self.llm.model(inputs_embeds=next_embed, past_key_values=past_key_values)
+            hidden = outputs.last_hidden_state
+            past_key_values = outputs.past_key_values
+
+        # Decode
+        if generated_ids:
+            generated_ids = torch.cat(generated_ids, dim=1)
+            captions = []
+            for b in range(B):
+                ids = generated_ids[b].tolist()
+                # Stop at EOS
+                if tokenizer.eos_token_id in ids:
+                    ids = ids[:ids.index(tokenizer.eos_token_id)]
+                caption = tokenizer.decode(ids, skip_special_tokens=True)
+                captions.append(caption)
+        else:
+            captions = [""] * B
+
+        # Restore original cache setting
+        self.llm.config.use_cache = orig_use_cache
+
+        return captions
 
 
 if __name__ == "__main__":

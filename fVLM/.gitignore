@@ -23,15 +23,16 @@ ENV/
 data/videos/
 data/latents/
 data/llava_video/
+data/webvid/
 
 # Model checkpoints
-outputs/checkpoints/
+outputs/*/checkpoints/
 *.pt
 *.pth
 *.safetensors
 
 # Logs
-outputs/logs/
+logs/
 wandb/
 *.log
 
@@ -40,7 +41,6 @@ wandb/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
 
 # MacOS
 .DS_Store
@@ -48,3 +48,7 @@ wandb/
 # Temporary
 *.tmp
 *.bak
+
+# Keep outputs structure but ignore large files
+outputs/**/frames/
+outputs/**/attention_maps/

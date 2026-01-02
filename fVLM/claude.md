@@ -10,6 +10,50 @@
 
 ---
 
+## Code Organization
+
+```
+fVLM/
+├── src/                      # Core library (imports as modules)
+│   ├── model/
+│   │   ├── foveated_vlm.py   # Main model class (FoveatedVLM)
+│   │   ├── encoder.py        # Vision encoder (FoveatedEncoder)
+│   │   └── prediction.py     # Prediction head (FiLM-conditioned)
+│   ├── data/
+│   │   ├── dataset.py        # WebVid dataset
+│   │   ├── streaming_dataset.py
+│   │   └── sampling.py       # Frame sampling utilities
+│   └── training/
+│       └── visualization.py  # Attention & prediction viz
+│
+├── scripts/                  # Runnable scripts
+│   ├── train_multitask.py    # MAIN: Multi-task training (reconstruction + caption)
+│   ├── train_phase1.py       # Phase 1: Reconstruction only
+│   ├── train_phase2.py       # Phase 2: Text-conditioned
+│   ├── test_captioning.py    # Evaluate captioning
+│   ├── visualize_attention.py
+│   ├── analyze_results.py
+│   ├── setup/                # Data & model setup
+│   │   ├── download_models.py
+│   │   ├── download_webvid.py
+│   │   └── precompute_latents.py
+│   └── archive/              # Old/experimental (don't use)
+│
+├── configs/                  # Training configs (YAML)
+├── core_docs/                # AUTHORITATIVE design docs
+├── docs/                     # Analysis, handoff, experiments
+├── outputs/                  # Training outputs (gitignored)
+├── logs/                     # Log files (gitignored)
+└── data/                     # Data files (gitignored)
+```
+
+**Key Entry Points:**
+- Training: `python scripts/train_multitask.py --config configs/train_webvid.yaml`
+- Evaluate: `python scripts/test_captioning.py`
+- Setup: `python scripts/setup/download_models.py`
+
+---
+
 ## Project Scope
 
 ### What We're Building
@@ -187,5 +231,5 @@ max_text_tokens = 32  # Truncate text context
 
 ---
 
-*Last updated: 2025-12-31*
+*Last updated: 2026-01-02*
 *For questions, refer to core_docs/ or consult with team*
