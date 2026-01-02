@@ -100,17 +100,21 @@ def train(config_path):
     sys.stdout.flush()
     # Try num_workers=1 for better throughput (WSL compatibility)
     # Falls back to 0 if multiprocessing fails
+    # Get frames_dir (optional, for pre-decoded frames - 20-100x faster)
+    frames_dir = config['data'].get('frames_dir', None)
+
     try:
         dataloader = create_dataloader(
             video_dir=config['data']['video_dir'],
             latent_dir=config['data']['latent_dir'],
             batch_size=config['training']['batch_size'],
-            num_workers=1,  # Try 1 worker - fallback to 0 if it hangs
+            num_workers=2,  # More workers for I/O bound loading
             shuffle=True,
             num_frames=config['data']['num_frames'],
             frame_size=config['data']['frame_size'],
+            frames_dir=frames_dir,
         )
-        print(f"   Using num_workers=1 with prefetching")
+        print(f"   Using num_workers=2 with prefetching")
     except Exception as e:
         print(f"   Multiprocessing failed ({e}), falling back to num_workers=0")
         dataloader = create_dataloader(
@@ -121,6 +125,7 @@ def train(config_path):
             shuffle=True,
             num_frames=config['data']['num_frames'],
             frame_size=config['data']['frame_size'],
+            frames_dir=frames_dir,
         )
     print(f"   Dataset size: {len(dataloader.dataset)}")
     print(f"   Batches per epoch: {len(dataloader)}")

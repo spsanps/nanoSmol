@@ -1,0 +1,34 @@
+# Streaming Training Config
+# Downloads from WebVid-10M on-the-fly
+# No disk storage, no sample repetition, no eval during training
+
+data:
+  num_frames: 16
+  frame_size: 256
+  # No paths needed - streaming from WebVid-10M
+
+model:
+  dino_model: "facebook/dinov2-small"
+  llm_model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  dino_dim: 384
+  llm_dim: 576
+  query_dim: 384
+  lambda_coarse: 1.0
+
+training:
+  batch_size: 8
+  grad_accum: 2           # Effective batch = 16
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_steps: 25000        # 400K samples with batch=16
+  grad_clip: 1.0
+  num_download_workers: 32 # Parallel video downloads (network I/O bound)
+  prefetch_batches: 16     # Keep GPU fed with large buffer
+
+logging:
+  log_every: 100
+  save_every: 10000
+  output_dir: "outputs/streaming"
+  wandb_project: "foveated-vlm"
+  wandb_entity: null

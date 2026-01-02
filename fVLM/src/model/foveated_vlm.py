@@ -73,8 +73,9 @@ class FoveatedVideoModel(nn.Module):
         self.llm = AutoModelForCausalLM.from_pretrained(llm_model)
         self.llm.config.use_cache = False  # Disable KV cache during training
 
-        # Projections
+        # Projections with scaling to match LLM embedding scale (~0.14 std)
         self.dino_to_llm = nn.Linear(dino_dim, llm_dim)
+        self.visual_scale = 0.14  # Scale factor to match LLM embedding std
         self.llm_to_query = nn.Linear(llm_dim, query_dim)
 
         # Prediction head (shared between passes)
@@ -86,18 +87,40 @@ class FoveatedVideoModel(nn.Module):
         self.z_vae_init = nn.Parameter(torch.zeros(1, 4, 32, 32))
 
         # Mode tokens (to signal coarse vs fine pass)
-        self.coarse_token = nn.Parameter(torch.randn(1, 1, llm_dim))
-        self.fine_token = nn.Parameter(torch.randn(1, 1, llm_dim))
+        # Scale to match LLM embedding std (~0.14) to avoid gradient explosion
+        self.coarse_token = nn.Parameter(torch.randn(1, 1, llm_dim) * 0.14)
+        self.fine_token = nn.Parameter(torch.randn(1, 1, llm_dim) * 0.14)
+
+        # Learnable "no text" token for Phase 1 (self-supervised)
+        self.no_text_token = nn.Parameter(torch.randn(1, 1, llm_dim) * 0.14)
 
     def get_empty_text_embeds(self, batch_size: int) -> torch.Tensor:
         """
         Get empty text embeddings for Phase 1 (self-supervised).
 
-        Returns a single dummy token per sample.
+        Returns learnable "no text" token for each sample.
         """
-        device = self.q_static.device
-        # Single dummy embedding per sample
-        return torch.zeros(batch_size, 1, self.llm_dim, device=device)
+        # Return learnable no_text_token expanded to batch size
+        return self.no_text_token.expand(batch_size, -1, -1)
+
+    def get_text_embeds(self, text_input_ids: torch.Tensor, text_attention_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Get text embeddings from LLM for Phase 2 (text-conditioned).
+
+        Args:
+            text_input_ids: [B, N_text] tokenized text
+            text_attention_mask: [B, N_text] attention mask
+
+        Returns:
+            text_embeds: [B, N_text, llm_dim] embedded text tokens
+        """
+        # Get embeddings from LLM's embedding layer
+        text_embeds = self.llm.get_input_embeddings()(text_input_ids)  # [B, N_text, llm_dim]
+
+        # Zero out padding tokens
+        text_embeds = text_embeds * text_attention_mask.unsqueeze(-1)
+
+        return text_embeds
 
     def forward(
         self,
@@ -126,15 +149,39 @@ class FoveatedVideoModel(nn.Module):
         frames_flat = raw_frames.reshape(B * T, 3, 256, 256)  # [B*T, 3, 256, 256]
         _, cache_flat = self.encoder.encode_patches(frames_flat)
 
-        # Reshape cache back to [B, T, N, D]
-        patch_features_flat = cache_flat['patch_features']  # [B*T, N, D]
+        # Reshape patch_features back to [B, T, N, D]
+        patch_features_flat = cache_flat['patch_features']  # [B*T, N+1, D]
         N, D = patch_features_flat.shape[1], patch_features_flat.shape[2]
-        patch_features = patch_features_flat.reshape(B, T, N, D)  # [B, T, N, D]
+        patch_features = patch_features_flat.reshape(B, T, N, D)  # [B, T, N+1, D]
 
-        # Create per-frame caches for query_attend
+        # Create per-frame caches
+        # For shallow mode: just patch_features
+        # For deep mode: also includes kv_cache (handled by encoder)
         all_caches = []
-        for t in range(T):
-            all_caches.append({'patch_features': patch_features[:, t]})  # [B, N, D]
+        if 'kv_cache' in cache_flat:
+            # Deep mode: reshape kv_cache for per-frame access
+            num_layers = len(cache_flat['kv_cache'])
+            for t in range(T):
+                frame_kv_cache = []
+                for layer_idx in range(num_layers):
+                    layer_cache = cache_flat['kv_cache'][layer_idx]
+                    K_all = layer_cache['K'].reshape(B, T, N, D)
+                    V_all = layer_cache['V'].reshape(B, T, N, D)
+                    frame_kv_cache.append({
+                        'K': K_all[:, t],
+                        'V': V_all[:, t],
+                        'layer': layer_cache['layer'],
+                    })
+                all_caches.append({
+                    'patch_features': patch_features[:, t],
+                    'kv_cache': frame_kv_cache,
+                })
+        else:
+            # Shallow mode: just patch_features per frame
+            for t in range(T):
+                all_caches.append({
+                    'patch_features': patch_features[:, t],  # [B, N+1, D]
+                })
 
         # === Pass 1: Query Planning with q_static ===
         q_static = self.q_static.expand(B, -1)  # [B, query_dim]
@@ -145,6 +192,7 @@ class FoveatedVideoModel(nn.Module):
             z_coarse_list.append(z_t)
         z_coarse = torch.stack(z_coarse_list, dim=1)  # [B, T, dino_dim]
         z_coarse = self.dino_to_llm(z_coarse)  # [B, T, llm_dim]
+        z_coarse = z_coarse / (z_coarse.std() + 1e-6) * self.visual_scale  # Scale to match LLM
 
         # Build Pass 1 sequence: [text, <coarse>, z°_1, ..., z°_T]
         coarse_token = self.coarse_token.expand(B, -1, -1)
@@ -183,6 +231,7 @@ class FoveatedVideoModel(nn.Module):
             z_focused_list.append(z_t)
         z_focused = torch.stack(z_focused_list, dim=1)  # [B, T, dino_dim]
         z_focused = self.dino_to_llm(z_focused)  # [B, T, llm_dim]
+        z_focused = z_focused / (z_focused.std() + 1e-6) * self.visual_scale  # Scale to match LLM
 
         # Build Pass 2 sequence: [text, <fine>, z_1, ..., z_T]
         fine_token = self.fine_token.expand(B, -1, -1)

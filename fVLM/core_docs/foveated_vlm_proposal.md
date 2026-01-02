@@ -1057,3 +1057,35 @@ Result:
 ```
 
 This asymmetry enables KV caching: compute patch KVs once, reuse for any query.
+
+---
+
+## Appendix D: Implementation Notes (Added 2024-12-31)
+
+### Query Attention Modes
+
+The encoder supports two query attention modes:
+
+1. **Shallow Mode (Default)**: Single cross-attention on final DINO features
+   - Query attends to DINO's final output embeddings (CLS + 256 patches)
+   - Faster training (~2x speed vs deep)
+   - Simpler implementation
+   - Good baseline for ablations
+
+2. **Deep Mode**: Query propagates through all 12 DINO layers
+   - Query injected at each layer, attends to cached K,V
+   - Richer multi-layer interaction
+   - Matches the original spec's vision of deep interaction
+   - Enable with `deep_query=True` in FoveatedEncoder
+
+**Current Training**: Using shallow mode for initial validation. Deep mode is preserved for future ablation experiments.
+
+**CLS Token**: Both modes keep the CLS token (not removed) to preserve DINO's pretrained attention patterns. Query attends to CLS + 256 patches = 257 tokens.
+
+```python
+# Shallow mode (default)
+encoder = FoveatedEncoder(deep_query=False)
+
+# Deep mode (for ablation)
+encoder = FoveatedEncoder(deep_query=True)
+```

@@ -1,0 +1,38 @@
+# Training config for WebVid dataset
+# Designed to avoid overfitting with proper train/val split
+
+data:
+  data_dir: "data/webvid"  # Contains frames/ and latents/ subdirs
+  num_frames: 16  # WebVid videos are longer
+  frame_size: 256
+
+model:
+  dino_model: "facebook/dinov2-small"
+  llm_model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  vae_model: "stabilityai/sd-vae-ft-mse"
+  dino_dim: 384
+  llm_dim: 576
+  query_dim: 384
+  lambda_coarse: 1.0
+
+training:
+  batch_size: 8          # Larger frames = smaller batch
+  grad_accum: 4          # Effective batch = 32
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500
+  num_epochs: 20         # Epoch-based, not step-based
+  grad_clip: 1.0
+  val_ratio: 0.1         # 10% for validation
+  patience: 5            # Early stopping patience
+  num_workers: 2
+
+precision:
+  dtype: "bfloat16"
+
+logging:
+  log_every: 50
+  val_every: 1           # Validate every epoch
+  output_dir: "outputs/webvid"
+  wandb_project: "foveated-vlm"
+  wandb_entity: null

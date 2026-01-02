@@ -6,6 +6,7 @@ data:
   frame_size: 256
   video_dir: "data/videos"
   latent_dir: "data/latents"
+  frames_dir: "data/frames"  # Pre-decoded frames (20-100x faster loading)
   caption_json: null  # Phase 1: no text conditioning
 
 model:
