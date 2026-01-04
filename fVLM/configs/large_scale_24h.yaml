@@ -1,0 +1,51 @@
+# Large-Scale 24-Hour Training Configuration
+# Optimized for RTX 4090 @ ~20GB VRAM
+
+run:
+  max_hours: 24
+  output_dir: "outputs/large_scale_24h"
+
+data:
+  num_frames: 16
+  frame_size: 256
+  min_duration: 5
+  max_duration: 30
+  max_caption_tokens: 64
+  # No local storage needed - streams from WebVid-10M
+
+training:
+  batch_size: 2          # Limited by VRAM
+  grad_accum: 8          # Effective batch = 16
+  learning_rate: 3.0e-5  # Lower LR for larger run
+  weight_decay: 0.01
+  warmup_steps: 1000     # ~2000 samples
+  grad_clip: 1.0
+
+  # Mode mixing (video-only, text-cond, captioning)
+  # More video-only since it's self-supervised and faster
+  mode_weights: [0.6, 0.2, 0.2]
+
+  # Loss weights
+  lambda_caption: 0.1    # Caption loss weight
+  lambda_coarse: 0.5     # Coarse (auxiliary) loss weight
+
+model:
+  dino_model: "facebook/dinov2-small"
+  llm_model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  vae_model: "stabilityai/sd-vae-ft-mse"
+  dino_dim: 384
+  llm_dim: 576
+  query_dim: 128
+
+logging:
+  log_every: 100
+  eval_every: 500
+  save_every: 2000       # Every ~4000 samples
+  wandb_project: "foveated-vlm-large"
+
+# Expected performance:
+# - ~2s per step (network I/O limited)
+# - ~43K steps in 24 hours
+# - ~700K samples seen (with effective batch 16)
+# - ~50% success rate on downloads
+# - ~350K successful training samples
