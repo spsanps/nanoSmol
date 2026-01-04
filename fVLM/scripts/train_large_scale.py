@@ -557,8 +557,11 @@ def main():
                 running['loss'] += total_loss.item() * config['grad_accum']
                 running['recon'] += loss_recon.item()
                 running['caption'] += loss_caption.item()
-                running['fine'] += loss_fine.item() / B if loss_fine > 0 else 0
-                running['coarse'] += loss_coarse.item() / B if loss_coarse > 0 else 0
+                # Count reconstruction samples for proper averaging
+                n_recon = sum(1 for m in modes if m.item() in [0, 1])
+                if n_recon > 0:
+                    running['fine'] += loss_fine.item() / n_recon
+                    running['coarse'] += loss_coarse.item() / n_recon
 
                 # Gradient step
                 if (global_step + 1) % config['grad_accum'] == 0:
@@ -582,10 +585,11 @@ def main():
                     hours_left = (max_seconds - elapsed) / 3600
 
                     pbar.set_postfix({
-                        'loss': f'{avg["loss"]:.4f}',
-                        'ratio': f'{ratio:.2f}',
-                        'suc%': f'{success_rate:.0f}',
-                        'left': f'{hours_left:.1f}h',
+                        'L': f'{avg["loss"]:.3f}',
+                        'fine': f'{avg["fine"]:.3f}',
+                        'coarse': f'{avg["coarse"]:.3f}',
+                        'r': f'{ratio:.2f}',
+                        'h': f'{hours_left:.1f}',
                     })
 
                     if HAS_WANDB and not args.no_wandb:
