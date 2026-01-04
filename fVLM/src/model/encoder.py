@@ -53,7 +53,10 @@ class FoveatedEncoder(nn.Module):
         self.head_dim = self.dino_dim // self.num_heads  # 64
 
         # Projections for query
-        self.query_input_proj = nn.Linear(query_dim, self.dino_dim)
+        # NOTE: bias=False is critical! With bias, different queries produce
+        # nearly identical embeddings at initialization (bias dominates),
+        # causing attention to be uniform and fine=coarse always.
+        self.query_input_proj = nn.Linear(query_dim, self.dino_dim, bias=False)
         self.query_output_proj = nn.Linear(self.dino_dim, output_dim)
 
         # For device inference

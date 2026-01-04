@@ -81,9 +81,12 @@ class FoveatedVideoModel(nn.Module):
         # Prediction head (shared between passes)
         self.pred_head = PredictionHead(h_dim=llm_dim, latent_channels=4)
 
-        # Learned parameters (careful initialization)
-        self.q_static = nn.Parameter(torch.randn(1, query_dim) * 0.02)
-        self.q_init = nn.Parameter(torch.randn(1, query_dim) * 0.02)
+        # Learned parameters
+        # NOTE: Queries should have std=1.0 (not 0.02!) so they dominate over
+        # the projection bias and produce meaningful attention patterns.
+        # See core_docs/foveated_vlm_proposal.md lines 529-531
+        self.q_static = nn.Parameter(torch.randn(1, query_dim))  # std=1.0
+        self.q_init = nn.Parameter(torch.randn(1, query_dim))    # std=1.0
         self.z_vae_init = nn.Parameter(torch.zeros(1, 4, 32, 32))
 
         # Mode tokens (to signal coarse vs fine pass)
