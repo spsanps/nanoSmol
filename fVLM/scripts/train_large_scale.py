@@ -120,10 +120,7 @@ class LargeScaleDataset(IterableDataset):
     """
     Streaming dataset for large-scale multi-task training.
 
-    Modes:
-        0: Video-only reconstruction (no caption needed)
-        1: Text-conditioned reconstruction (caption as input)
-        2: Video captioning (caption as target)
+    Mode is selected per-batch (not per-sample) to allow proper batch processing.
     """
 
     def __init__(
@@ -134,7 +131,6 @@ class LargeScaleDataset(IterableDataset):
         max_duration: int = 30,
         max_caption_tokens: int = 64,
         llm_model: str = "HuggingFaceTB/SmolLM2-135M-Instruct",
-        mode_weights: tuple = (0.6, 0.2, 0.2),  # video-only, text-cond, captioning
         seed: int = None,
     ):
         self.num_frames = num_frames
@@ -142,7 +138,6 @@ class LargeScaleDataset(IterableDataset):
         self.min_duration = min_duration
         self.max_duration = max_duration
         self.max_caption_tokens = max_caption_tokens
-        self.mode_weights = mode_weights
         self.seed = seed
 
         self.tokenizer = AutoTokenizer.from_pretrained(llm_model)
@@ -151,12 +146,7 @@ class LargeScaleDataset(IterableDataset):
 
         self.stats = {
             'attempted': 0, 'success': 0, 'filtered': 0, 'failed': 0,
-            'mode_0': 0, 'mode_1': 0, 'mode_2': 0,
         }
-
-    def _sample_mode(self) -> int:
-        """Sample training mode based on weights."""
-        return random.choices([0, 1, 2], weights=self.mode_weights)[0]
 
     def __iter__(self):
         if self.seed is not None:
@@ -205,11 +195,7 @@ class LargeScaleDataset(IterableDataset):
                 self.stats['failed'] += 1
                 continue
 
-            # Sample training mode
-            mode = self._sample_mode()
-            self.stats[f'mode_{mode}'] += 1
-
-            # Tokenize caption (needed for modes 1 and 2)
+            # Tokenize caption
             caption = sample.get('name', '')
             tokens = self.tokenizer(
                 caption,
@@ -226,7 +212,6 @@ class LargeScaleDataset(IterableDataset):
                 'caption_ids': tokens['input_ids'].squeeze(0),
                 'caption_mask': tokens['attention_mask'].squeeze(0),
                 'caption': caption,
-                'mode': mode,
             }
 
 
@@ -263,13 +248,12 @@ class PrefetchingDataset(IterableDataset):
 
 
 def collate_fn(batch):
-    """Collate batch, grouping by mode for efficient processing."""
+    """Collate batch."""
     return {
         'frames_raw': torch.stack([b['frames_raw'] for b in batch]),
         'caption_ids': torch.stack([b['caption_ids'] for b in batch]),
         'caption_mask': torch.stack([b['caption_mask'] for b in batch]),
         'captions': [b['caption'] for b in batch],
-        'modes': torch.tensor([b['mode'] for b in batch]),
     }
 
 
@@ -456,7 +440,6 @@ def main():
         max_duration=config['max_duration'],
         max_caption_tokens=config['max_caption_tokens'],
         llm_model=model_cfg['llm_model'],
-        mode_weights=config['mode_weights'],
     )
     dataset = PrefetchingDataset(base_dataset, buffer_size=32)
     dataloader = DataLoader(
@@ -481,6 +464,7 @@ def main():
         'loss': 0, 'recon': 0, 'caption': 0, 'fine': 0, 'coarse': 0,
         'mode_0': 0, 'mode_1': 0, 'mode_2': 0,
     }
+    mode_weights = config['mode_weights']
 
     pbar = tqdm(desc="Training", initial=start_step)
 
@@ -499,69 +483,52 @@ def main():
                 frames_raw = batch['frames_raw']
                 caption_ids = batch['caption_ids'].to(device)
                 caption_mask = batch['caption_mask'].to(device)
-                modes = batch['modes']
 
                 # Compute VAE latents
                 latents = compute_vae_latents(frames_raw, vae, device)
                 frames = normalize_for_dino(frames_raw, device)
 
-                B = frames.shape[0]
-                total_loss = 0
-                loss_recon = torch.tensor(0.0, device=device)
-                loss_caption = torch.tensor(0.0, device=device)
-                loss_fine = torch.tensor(0.0, device=device)
-                loss_coarse = torch.tensor(0.0, device=device)
+                # Sample mode for entire batch (not per-sample!)
+                # This ensures proper batch processing like train_multitask.py
+                mode = random.choices([0, 1, 2], weights=mode_weights)[0]
+                running[f'mode_{mode}'] += 1
 
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                    for i in range(B):
-                        mode = modes[i].item()
-                        running[f'mode_{mode}'] += 1
+                    if mode == 0:
+                        # Video-only reconstruction (self-supervised)
+                        text_embeds = model.get_empty_text_embeds(frames.shape[0])
+                        loss_recon, loss_fine, loss_coarse = model(text_embeds, frames, latents)
+                        loss = loss_recon
+                        loss_caption = torch.tensor(0.0, device=device)
 
-                        f = frames[i:i+1]
-                        l = latents[i:i+1]
-                        c_ids = caption_ids[i:i+1]
-                        c_mask = caption_mask[i:i+1]
+                    elif mode == 1:
+                        # Text-conditioned reconstruction
+                        text_embeds = model.get_text_embeds(caption_ids, caption_mask)
+                        loss_recon, loss_fine, loss_coarse = model(text_embeds, frames, latents)
+                        loss = loss_recon
+                        loss_caption = torch.tensor(0.0, device=device)
 
-                        if mode == 0:
-                            # Video-only reconstruction
-                            text_embeds = model.get_empty_text_embeds(1)
-                            loss, l_fine, l_coarse = model(text_embeds, f, l)
-                            loss_recon = loss_recon + loss
-                            loss_fine = loss_fine + l_fine
-                            loss_coarse = loss_coarse + l_coarse
+                    else:  # mode == 2
+                        # Video captioning
+                        loss_caption = model.forward_captioning(frames, caption_ids, caption_mask, use_fine=True)
+                        loss = config['lambda_caption'] * loss_caption
+                        loss_recon = torch.tensor(0.0, device=device)
+                        loss_fine = torch.tensor(0.0, device=device)
+                        loss_coarse = torch.tensor(0.0, device=device)
 
-                        elif mode == 1:
-                            # Text-conditioned reconstruction
-                            text_embeds = model.get_text_embeds(c_ids, c_mask)
-                            loss, l_fine, l_coarse = model(text_embeds, f, l)
-                            loss_recon = loss_recon + loss
-                            loss_fine = loss_fine + l_fine
-                            loss_coarse = loss_coarse + l_coarse
+                    # Scale for gradient accumulation
+                    loss = loss / config['grad_accum']
 
-                        elif mode == 2:
-                            # Video captioning
-                            l_cap = model.forward_captioning(f, c_ids, c_mask, use_fine=True)
-                            loss_caption = loss_caption + l_cap
-
-                    # Average losses
-                    loss_recon = loss_recon / max(sum(1 for m in modes if m.item() in [0, 1]), 1)
-                    loss_caption = loss_caption / max(sum(1 for m in modes if m.item() == 2), 1)
-
-                    # Combined loss
-                    total_loss = loss_recon + config['lambda_caption'] * loss_caption
-                    total_loss = total_loss / config['grad_accum']
-
-                scaler.scale(total_loss).backward()
+                scaler.scale(loss).backward()
 
                 # Update running stats
-                running['loss'] += total_loss.item() * config['grad_accum']
-                running['recon'] += loss_recon.item()
-                running['caption'] += loss_caption.item()
-                # Count reconstruction samples for proper averaging
-                n_recon = sum(1 for m in modes if m.item() in [0, 1])
-                if n_recon > 0:
-                    running['fine'] += loss_fine.item() / n_recon
-                    running['coarse'] += loss_coarse.item() / n_recon
+                running['loss'] += loss.item() * config['grad_accum']
+                if mode in [0, 1]:
+                    running['recon'] += loss_recon.item()
+                    running['fine'] += loss_fine.item()
+                    running['coarse'] += loss_coarse.item()
+                else:
+                    running['caption'] += loss_caption.item()
 
                 # Gradient step
                 if (global_step + 1) % config['grad_accum'] == 0:
@@ -578,33 +545,42 @@ def main():
                 # Logging
                 if global_step % config['log_every'] == 0:
                     n = config['log_every']
-                    avg = {k: v / n for k, v in running.items()}
-                    ratio = avg['coarse'] / (avg['fine'] + 1e-8) if avg['fine'] > 0 else 1.0
+                    # Compute averages only over steps that had reconstruction
+                    n_recon = running['mode_0'] + running['mode_1']
+                    n_cap = running['mode_2']
+
+                    avg_loss = running['loss'] / n
+                    avg_fine = running['fine'] / max(n_recon, 1)
+                    avg_coarse = running['coarse'] / max(n_recon, 1)
+                    avg_recon = running['recon'] / max(n_recon, 1)
+                    avg_caption = running['caption'] / max(n_cap, 1)
+                    ratio = avg_coarse / (avg_fine + 1e-8) if avg_fine > 0 else 1.0
+
                     stats = base_dataset.stats
                     success_rate = stats['success'] / max(stats['attempted'], 1) * 100
                     hours_left = (max_seconds - elapsed) / 3600
 
                     pbar.set_postfix({
-                        'L': f'{avg["loss"]:.3f}',
-                        'fine': f'{avg["fine"]:.3f}',
-                        'coarse': f'{avg["coarse"]:.3f}',
+                        'L': f'{avg_loss:.3f}',
+                        'fine': f'{avg_fine:.3f}',
+                        'coarse': f'{avg_coarse:.3f}',
                         'r': f'{ratio:.2f}',
                         'h': f'{hours_left:.1f}',
                     })
 
                     if HAS_WANDB and not args.no_wandb:
                         wandb.log({
-                            'loss_total': avg['loss'],
-                            'loss_recon': avg['recon'],
-                            'loss_caption': avg['caption'],
-                            'loss_fine': avg['fine'],
-                            'loss_coarse': avg['coarse'],
+                            'loss_total': avg_loss,
+                            'loss_recon': avg_recon,
+                            'loss_caption': avg_caption,
+                            'loss_fine': avg_fine,
+                            'loss_coarse': avg_coarse,
                             'ratio': ratio,
                             'lr': scheduler.get_last_lr()[0],
                             'success_rate': success_rate,
-                            'mode_video_only': avg['mode_0'] / n,
-                            'mode_text_cond': avg['mode_1'] / n,
-                            'mode_captioning': avg['mode_2'] / n,
+                            'mode_video_only': running['mode_0'] / n,
+                            'mode_text_cond': running['mode_1'] / n,
+                            'mode_captioning': running['mode_2'] / n,
                             'hours_elapsed': elapsed / 3600,
                             'samples_seen': stats['success'],
                         }, step=global_step)
