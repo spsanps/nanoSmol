@@ -6,7 +6,35 @@
 1. `core_docs/foveated_vlm_proposal.md` - Architecture specification
 2. `core_docs/foveated_vlm_execution_guide.md` - Implementation guide
 
+**LIVING DOCUMENTS** (Update as you learn):
+3. `docs/KNOWLEDGE.md` - Bugs, fixes, experiments, insights
+4. `CLAUDE.md` - This file (debugging checklists, quick reference)
+
 **Always refer to these docs before making architectural or implementation decisions.**
+
+---
+
+## How to Document Knowledge
+
+When you discover something important (bug, insight, optimization), document it:
+
+### For Bugs:
+1. Add to `docs/KNOWLEDGE.md` under "Critical Bugs & Fixes"
+2. Follow format: Symptom → Root Cause → Diagnosis → Fix
+3. If it's a debugging pattern, add to CLAUDE.md "Debugging Checklist"
+
+### For Experiments:
+1. Add to `docs/KNOWLEDGE.md` under "Experiment History"
+2. Include: date, config, results, key findings
+
+### For Insights:
+1. Add to `docs/KNOWLEDGE.md` under "Training Insights" or "Architecture Notes"
+2. Include context and evidence
+
+### Commit Format:
+```
+docs: Add BUG-XXX (short description)
+```
 
 ---
 
@@ -231,5 +259,117 @@ max_text_tokens = 32  # Truncate text context
 
 ---
 
-*Last updated: 2026-01-02*
+## Known Bugs & Fixes (Historical)
+
+### Bug 1: Query Initialization Too Small (Fixed 2026-01-04)
+
+**Symptom:** `loss_fine == loss_coarse` exactly (to 3 decimal places)
+
+**Root Cause:** Query vectors (`q_static`, `q_init`) were initialized with `std=0.02` instead of `std=1.0` as specified in the proposal (lines 529-531). This caused the linear projection's bias term to dominate the query embedding.
+
+**Evidence:**
+```python
+# With std=0.02:
+# - Embedding difference: 0.012 (nearly identical)
+# - Attention entropy: 5.548 (nearly uniform, max=5.549)
+# - Output correlation: 0.9998 (identical outputs)
+
+# With std=1.0 (fixed):
+# - Embedding difference: 0.75 (60x larger!)
+# - Attention entropy: 5.28 (selective)
+# - Output correlation: 0.52 (different features)
+```
+
+**Fix:** Change initialization in `src/model/foveated_vlm.py`:
+```python
+# WRONG (was):
+self.q_static = nn.Parameter(torch.randn(1, query_dim) * 0.02)
+
+# CORRECT (fixed):
+self.q_static = nn.Parameter(torch.randn(1, query_dim))  # std=1.0
+```
+
+---
+
+### Bug 2: Query Projection Bias Dominates (Fixed 2026-01-04)
+
+**Symptom:** Different queries produce nearly identical attention patterns
+
+**Root Cause:** The `query_input_proj` linear layer had default bias initialization. With small queries, the bias term dominated the projected embedding, causing all queries to produce similar attention patterns.
+
+**Fix:** Remove bias from projection in `src/model/encoder.py`:
+```python
+# WRONG (was):
+self.query_input_proj = nn.Linear(query_dim, self.dino_dim)
+
+# CORRECT (fixed):
+self.query_input_proj = nn.Linear(query_dim, self.dino_dim, bias=False)
+```
+
+---
+
+### Bug 3: Per-Sample Mode Selection (Fixed 2026-01-04)
+
+**Symptom:** Losses increasing instead of decreasing during training
+
+**Root Cause:** The training loop in `train_large_scale.py` was processing samples individually within a batch with different modes, which broke the model's batch processing. The model expects full batches, not single samples.
+
+**Fix:** Select mode per-batch (not per-sample):
+```python
+# WRONG (was): Process each sample in batch individually
+for i in range(B):
+    mode = modes[i].item()
+    f = frames[i:i+1]  # Single sample - BROKEN
+    ...
+
+# CORRECT (fixed): Process entire batch with one mode
+mode = random.choices([0, 1, 2], weights=mode_weights)[0]
+if mode == 0:
+    text_embeds = model.get_empty_text_embeds(B)
+    loss, fine, coarse = model(text_embeds, frames, latents)
+...
+```
+
+---
+
+## Debugging Checklist
+
+When `loss_fine == loss_coarse` (or ratio stays at 1.0):
+
+1. **Check query initialization scale:**
+   ```python
+   print(model.q_static.std())  # Should be ~1.0, not 0.02
+   ```
+
+2. **Check attention entropy:**
+   ```python
+   # Low entropy = selective (good)
+   # High entropy (near log(N)) = uniform (bad)
+   ```
+
+3. **Check query embedding difference:**
+   ```python
+   embed1 = encoder.query_input_proj(q_static)
+   embed2 = encoder.query_input_proj(q_init)
+   print((embed1 - embed2).abs().mean())  # Should be > 0.5
+   ```
+
+4. **Verify per-batch (not per-sample) mode selection**
+
+5. **Check if DINO is being fine-tuned** (should be trainable)
+
+---
+
+## Training Scripts
+
+| Script | Purpose | Status |
+|--------|---------|--------|
+| `scripts/train_multitask.py` | Multi-task training (tested, works) | ✓ Stable |
+| `scripts/train_large_scale.py` | 24h streaming training | ✓ Fixed |
+| `scripts/train_phase1.py` | Phase 1 reconstruction only | Legacy |
+| `scripts/train_phase2.py` | Phase 2 text-conditioned | Legacy |
+
+---
+
+*Last updated: 2026-01-04*
 *For questions, refer to core_docs/ or consult with team*
