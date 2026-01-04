@@ -45,6 +45,7 @@ class FoveatedVideoModel(nn.Module):
         llm_dim: int = 576,
         query_dim: int = 384,
         lambda_coarse: float = 1.0,
+        deep_query: bool = True,  # Use deep query injection for better differentiation
     ):
         """
         Args:
@@ -54,6 +55,7 @@ class FoveatedVideoModel(nn.Module):
             llm_dim: LLM hidden dimension
             query_dim: Query vector dimension
             lambda_coarse: Weight for auxiliary coarse loss
+            deep_query: If True, query propagates through all DINO layers (more selective)
         """
         super().__init__()
 
@@ -63,10 +65,14 @@ class FoveatedVideoModel(nn.Module):
         self.lambda_coarse = lambda_coarse
 
         # Vision encoder
+        # NOTE: deep_query=True is critical! Shallow mode produces nearly uniform
+        # attention (output correlation ~0.98), while deep mode is selective (correlation ~0.43).
+        # Without deep mode, loss_fine == loss_coarse always.
         self.encoder = FoveatedEncoder(
             dino_model_name=dino_model,
             query_dim=query_dim,
             output_dim=dino_dim,
+            deep_query=deep_query,
         )
 
         # Core LLM
@@ -290,8 +296,29 @@ class FoveatedVideoModel(nn.Module):
         N, D = patch_features_flat.shape[1], patch_features_flat.shape[2]
         patch_features = patch_features_flat.reshape(B, T, N, D)
 
-        # Create per-frame caches
-        all_caches = [{'patch_features': patch_features[:, t]} for t in range(T)]
+        # Create per-frame caches (must handle both shallow and deep mode)
+        all_caches = []
+        if 'kv_cache' in cache_flat:
+            # Deep mode: reshape kv_cache for per-frame access
+            num_layers = len(cache_flat['kv_cache'])
+            for t in range(T):
+                frame_kv_cache = []
+                for layer_idx in range(num_layers):
+                    layer_cache = cache_flat['kv_cache'][layer_idx]
+                    K_all = layer_cache['K'].reshape(B, T, N, D)
+                    V_all = layer_cache['V'].reshape(B, T, N, D)
+                    frame_kv_cache.append({
+                        'K': K_all[:, t],
+                        'V': V_all[:, t],
+                        'layer': layer_cache['layer'],
+                    })
+                all_caches.append({
+                    'patch_features': patch_features[:, t],
+                    'kv_cache': frame_kv_cache,
+                })
+        else:
+            # Shallow mode: just patch_features per frame
+            all_caches = [{'patch_features': patch_features[:, t]} for t in range(T)]
 
         if use_fine:
             # Two-pass encoding

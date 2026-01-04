@@ -358,6 +358,13 @@ When `loss_fine == loss_coarse` (or ratio stays at 1.0):
 
 5. **Check if DINO is being fine-tuned** (should be trainable)
 
+6. **Verify deep_query=True:**
+   ```python
+   print(model.encoder.deep_query)  # Should be True!
+   # Shallow mode produces uniform attention (output correlation ~0.98)
+   # Deep mode produces selective attention (output correlation ~0.43)
+   ```
+
 ---
 
 ## Training Scripts

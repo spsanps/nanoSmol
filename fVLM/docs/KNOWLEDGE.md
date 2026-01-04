@@ -81,6 +81,43 @@ self.query_input_proj = nn.Linear(query_dim, self.dino_dim, bias=False)
 
 ---
 
+### BUG-004: Shallow Mode Produces Uniform Attention (2026-01-04)
+
+**Symptom:** `loss_fine == loss_coarse` (ratio = 1.00) even after fixing query initialization
+
+**Root Cause:** Shallow mode (`deep_query=False`) uses a single cross-attention layer on DINO's final features. These features are highly correlated across spatial positions (self-dot-products have mean=2113, std=344), causing attention to be nearly uniform (entropy=5.55, max=5.55).
+
+**Diagnosis:**
+```python
+# Test with different queries:
+# Shallow mode:
+#   Output correlation: 0.9818 (nearly identical!)
+#   Attention entropy: 5.55 (completely uniform)
+#
+# Deep mode:
+#   Output correlation: 0.4341 (differentiated)
+#   Queries propagate through all 12 DINO layers
+```
+
+**Evidence:**
+| Mode | Output Correlation | Output L2 Diff | Attention |
+|------|-------------------|----------------|-----------|
+| Shallow | 0.98 | 7.7 | Uniform |
+| Deep | 0.43 | 48.7 | Selective |
+
+**Fix:** Enable deep query mode in `src/model/foveated_vlm.py`:
+```python
+# Default changed to deep_query=True
+self.encoder = FoveatedEncoder(
+    ...
+    deep_query=True,  # CRITICAL for query differentiation
+)
+```
+
+**Performance Impact:** Deep mode is ~42x slower per query_attend call but only ~10% slower overall due to other overhead (DINO encoding, LLM forward passes).
+
+---
+
 ## Training Insights
 
 ### Observation: Fine/Coarse Ratio Stays at 1.0 (Historical)
