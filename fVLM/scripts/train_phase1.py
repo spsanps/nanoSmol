@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler
 import sys
+import time
 import yaml
 from pathlib import Path
 from tqdm import tqdm
@@ -170,12 +171,16 @@ def train(config_path):
     # Training loop
     print("\n🚀 Starting training...")
     print(f"   Max steps: {config['training']['max_steps']}")
+    max_hours = config['training'].get('max_hours', None)
+    if max_hours:
+        print(f"   Max hours: {max_hours}")
     print(f"   Logging every: {config['logging']['log_every']} steps")
     print(f"   Saving every: {config['logging']['save_every']} steps")
     print("=" * 70)
 
     model.train()
     global_step = 0
+    start_time = time.time()
     running_metrics = {'loss': 0, 'loss_fine': 0, 'loss_coarse': 0, 'loss_ratio': 0}
 
     pbar = tqdm(total=config['training']['max_steps'], desc="Training")
@@ -236,6 +241,19 @@ def train(config_path):
             scheduler.step()
 
             if global_step >= config['training']['max_steps']:
+                break
+
+            # Check time limit
+            if max_hours is not None:
+                elapsed_hours = (time.time() - start_time) / 3600
+                if elapsed_hours >= max_hours:
+                    print(f"\n⏰ Time limit reached ({max_hours}h). Stopping training.")
+                    break
+
+        # Break outer loop too if time/steps reached
+        if max_hours is not None:
+            elapsed_hours = (time.time() - start_time) / 3600
+            if elapsed_hours >= max_hours:
                 break
 
     pbar.close()

@@ -323,6 +323,8 @@ def main():
     parser.add_argument('--no_wandb', action='store_true')
     parser.add_argument('--mode_weights', type=str, default='0.6,0.2,0.2',
                        help='Weights for video-only,text-cond,captioning')
+    parser.add_argument('--freeze_dino', action='store_true',
+                       help='Freeze DINO backbone (ablation winner!)')
     args = parser.parse_args()
 
     # Parse mode weights
@@ -348,15 +350,19 @@ def main():
         'save_every': 2000,
         'eval_every': 500,
         'output_dir': args.output_dir,
+        'freeze_dino': args.freeze_dino,
     }
 
     print("=" * 70)
     print("Large-Scale Multi-Task Training")
+    if args.freeze_dino:
+        print(">>> DINO FROZEN (ablation winner!) <<<")
     print("=" * 70)
     print(f"Max duration: {config['max_hours']} hours")
     print(f"Batch: {config['batch_size']} x {config['grad_accum']} = {config['batch_size'] * config['grad_accum']}")
     print(f"Learning rate: {config['learning_rate']}")
     print(f"Mode weights: video-only={mode_weights[0]:.1%}, text-cond={mode_weights[1]:.1%}, caption={mode_weights[2]:.1%}")
+    print(f"Freeze DINO: {args.freeze_dino}")
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     output_dir = Path(config['output_dir'])
@@ -394,8 +400,14 @@ def main():
         'llm_dim': 576,
         'query_dim': 128,
         'lambda_coarse': config['lambda_coarse'],
+        'freeze_dino': args.freeze_dino,
     }
     model = FoveatedVideoModel(**model_cfg).to(device)
+
+    if args.freeze_dino:
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        print(f"DINO frozen! Trainable: {trainable/1e6:.1f}M, Frozen: {frozen/1e6:.1f}M")
 
     # Enable gradient checkpointing
     if hasattr(model.llm, 'gradient_checkpointing_enable'):

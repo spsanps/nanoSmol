@@ -1,0 +1,42 @@
+# Phase 1: Self-Supervised Next-Frame Prediction with 9K+ data
+# Uses the correct FoveatedVideoModel with two-pass architecture
+# Key: loss_fine < loss_coarse validates foveated attention helps
+
+data:
+  num_frames: 8
+  frame_size: 256
+  video_dir: "data/videos"           # Dummy - not used with frames_dir
+  latent_dir: "data/latents"         # 813 VAE latent files
+  frames_dir: "data/frames"          # 813 pre-decoded frame files
+  caption_json: null                  # Phase 1: no text conditioning
+
+model:
+  dino_model: "facebook/dinov2-small"
+  llm_model: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  vae_model: "stabilityai/sd-vae-ft-mse"
+  dino_dim: 384
+  llm_dim: 576
+  query_dim: 384
+  lambda_coarse: 1.0  # Auxiliary loss weight
+
+training:
+  batch_size: 4           # Conservative for 8 frames
+  grad_accum: 4           # Effective batch = 16
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 200
+  max_steps: 10000        # ~4 hours of training (~120 epochs)
+  max_hours: 4            # Stop after 4 hours
+  grad_clip: 1.0
+
+precision:
+  dtype: "bfloat16"
+  grad_checkpoint: false
+
+logging:
+  log_every: 50
+  save_every: 1000
+  eval_every: 500
+  output_dir: "outputs/foveated_4h"
+  wandb_project: "foveated-vlm"
+  wandb_entity: null
