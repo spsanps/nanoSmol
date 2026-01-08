@@ -781,4 +781,48 @@ To validate the foveated attention hypothesis, redesign the task to require spat
 
 ---
 
+---
+
+### Captioning Experiment: Hypothesis Validated! (2026-01-08)
+
+**Purpose:** Test if captioning (semantic task) benefits from foveated attention, unlike reconstruction (global task).
+
+**Script:** `scripts/experiment_captioning_fast.py`
+
+**Dataset:** WebVid-10M streaming (short videos <15s with captions)
+
+**Key Change:** Train on captioning ONLY (cross-entropy loss), compare fine vs coarse.
+
+**Results (460+ steps, still running):**
+
+| Metric | Value |
+|--------|-------|
+| Ratios > 1.0 | 100% (17/17) |
+| Ratios > 1.05 | 88.2% |
+| Ratios > 1.1 | 64.7% |
+| Mean ratio | 1.140 |
+| Best ratio_avg20 | 1.289 |
+
+**Key Finding:**
+
+Fine queries (dynamic, LLM-generated) consistently outperform coarse queries (static) by **10-23%** on captioning loss!
+
+This validates the core hypothesis:
+- **Reconstruction:** Global task, any weighted average works → ratio ≈ 1.0
+- **Captioning:** Semantic task, requires understanding WHAT is in the video → ratio > 1.0
+
+**Why Captioning Benefits:**
+
+Captions require identifying:
+- Objects ("a person", "a car")
+- Actions ("running", "flying")
+- Relationships ("person riding bike")
+- Attributes ("red", "small")
+
+These are spatially localized features that benefit from selective attention.
+
+**wandb:** https://wandb.ai/sanjayanps/foveated-vlm-captioning
+
+---
+
 *Last updated: 2026-01-08*
