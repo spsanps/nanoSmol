@@ -529,6 +529,57 @@ See `docs/IDEAS_TO_TRY.md` for full implementation details.
 
 ---
 
+### Multi-Pass Refinement Experiments (2026-01-07)
+
+**Purpose:** Test if multi-pass query refinement and/or longer sequences can create fine/coarse gap.
+
+**Hypotheses:**
+1. Single refinement pass isn't enough - need iterative refinement
+2. Longer sequences provide more temporal context for dynamic queries
+
+**Configuration:**
+- 5 experiments with varying passes (1, 2, 3) and frames (8, 16)
+- 1,500 steps each on local WebVid data (813 videos)
+- freeze_dino=True (based on ablation results)
+
+**Results:**
+
+| Experiment | Config | Final Ratio | Fine Loss | Coarse Loss | Result |
+|------------|--------|-------------|-----------|-------------|--------|
+| A | 1 pass, 8 frames | 1.0015 | 0.495 | 0.496 | No gap |
+| B | 2 passes, 8 frames | 1.0046 | 0.515 | 0.517 | No gap |
+| C | 3 passes, 8 frames | 1.0000 | 0.472 | 0.472 | No gap |
+| D | 1 pass, 16 frames | 1.0003 | 0.261 | 0.261 | No gap |
+| E | 3 passes, 16 frames | 0.9996 | 0.274 | 0.274 | No gap |
+
+**Key Observations:**
+
+1. **Multi-pass refinement doesn't help:**
+   - B (2-pass) and C (3-pass) show no improvement over A (1-pass)
+   - Each refinement pass produces nearly identical loss (r0 ≈ r1 ≈ r2)
+   - Passes aren't learning to extract different information
+
+2. **Longer sequences improve prediction but don't create gap:**
+   - D and E achieve much lower loss (~0.27 vs ~0.47)
+   - More temporal context helps overall prediction
+   - But ratio remains ~1.0 (no fine/coarse difference)
+
+3. **E shows ratio < 1.0:**
+   - With 3 passes + 16 frames, fine is slightly WORSE than coarse
+   - Additional complexity may hurt rather than help
+
+**Conclusion:**
+
+Neither multi-pass refinement nor longer sequences address the core issue. The problem is fundamental to the query mechanism - different queries don't extract sufficiently different features regardless of:
+- Number of refinement iterations
+- Temporal context length
+
+**wandb runs:** https://wandb.ai/sanjayanps/foveated-vlm-multipass
+
+**Code:** `scripts/experiment_multipass_local.py`
+
+---
+
 ## Quick Reference
 
 ### Debugging loss_fine == loss_coarse
@@ -553,4 +604,4 @@ See `docs/IDEAS_TO_TRY.md` for full implementation details.
 
 ---
 
-*Last updated: 2026-01-06*
+*Last updated: 2026-01-07*
