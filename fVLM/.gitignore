@@ -52,3 +52,4 @@ wandb/
 # Keep outputs structure but ignore large files
 outputs/**/frames/
 outputs/**/attention_maps/
+.gradio/
