@@ -580,6 +580,44 @@ Neither multi-pass refinement nor longer sequences address the core issue. The p
 
 ---
 
+### Attention Fix Experiments (2026-01-07)
+
+**Purpose:** Test if attention mechanism fixes can create fine/coarse gap.
+
+**Experiments:**
+
+| # | Config | Ratio | Z_Sim | Notes |
+|---|--------|-------|-------|-------|
+| 1 | Baseline | 0.9991 | 0.19 | Control |
+| 2 | temp=0.1 | 0.9998 | 0.32 | Sharper attention, no effect |
+| 3 | Contrastive | 1.0016 | **-0.78** | Features anti-correlated! |
+| 4 | Top-k=16 | 0.9933 | 0.25 | Actually hurt |
+| 5 | temp+contrastive | 1.0047 | -0.36 | Combined |
+| 6 | temp+topk | 1.0023 | 0.12 | Combined |
+
+**CRITICAL FINDING:**
+
+Contrastive loss successfully pushed z_fine and z_coarse to be **anti-correlated** (z_sim = -0.78), but the ratio stayed at ~1.0.
+
+This proves:
+1. We CAN make the features different (contrastive works)
+2. But different features don't help prediction
+3. **The task itself doesn't require foveated attention**
+
+**Conclusion:**
+
+Next-frame latent prediction is solvable with ANY weighted average of patches. The task is too "global" - it doesn't require spatial focus.
+
+**Next Steps (Task Redesign):**
+- Object tracking: "Where did X go?" - requires spatial focus
+- Sparse reconstruction: Predict only 25% of patches - forces selective attention
+- Action recognition: Motion-focused features needed
+- Longer-horizon prediction: Current frame → frame t+5
+
+**wandb:** https://wandb.ai/sanjayanps/foveated-vlm-attention-fixes
+
+---
+
 ## Quick Reference
 
 ### Debugging loss_fine == loss_coarse
