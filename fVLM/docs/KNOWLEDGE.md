@@ -618,6 +618,145 @@ Next-frame latent prediction is solvable with ANY weighted average of patches. T
 
 ---
 
+### Diagnostic Analysis: Query Generation Bottleneck (2026-01-07)
+
+**Purpose:** Deep investigation into why ratio stays at 1.0 despite attention mechanism fixes.
+
+**Script:** `scripts/diagnostic_attention.py`
+
+**Method:** Loaded real FoveatedVideoModel and analyzed each stage:
+1. Encode frames and verify deep query mode active
+2. Extract coarse features with q_static
+3. Generate dynamic queries from LLM
+4. Extract fine features with dynamic queries
+5. Compare at each stage
+
+**KEY FINDINGS:**
+
+**1. Deep Query Mode WORKS:**
+```
+Opposite queries (q vs -q) → features similarity: -0.7214
+Orthogonal queries → features similarity: 0.3241
+```
+The attention mechanism correctly produces different features for different queries.
+
+**2. BOTTLENECK IDENTIFIED - Query Generation:**
+```
+Query similarity across frames:
+   Frame 0 vs 1: 0.9414
+   Frame 1 vs 2: 0.9542
+   ...
+   Frame 6 vs 7: 0.9965  ← Almost identical!
+
+Query variance across frames: 0.000094
+```
+The LLM generates queries that are 92-98% similar across all frames!
+
+**3. z_coarse vs z_fine Similarity:**
+```
+Raw features: ~57% similar (not 98% as in simplified experiments)
+After normalization: ~57% similar
+```
+With real model, features ARE somewhat different, but not enough.
+
+**4. LLM Hidden States:**
+```
+h_coarse vs h_fine similarity: 0.89-0.92 per frame
+```
+LLM processes similar features similarly.
+
+**Root Cause Confirmed:**
+- The attention mechanism works correctly
+- The LLM fails to generate diverse queries
+- Queries converge to near-identical values regardless of frame content
+- This explains why ratio=1.0: q_static ≈ q_dynamic → z_coarse ≈ z_fine
+
+---
+
+### Query Diversity Experiments (2026-01-07)
+
+**Purpose:** Test if forcing query diversity can create fine/coarse gap.
+
+**Script:** `scripts/experiment_query_diversity.py`
+
+**Hypothesis:** If we force the queries to be different, will the features differ enough to help prediction?
+
+**5 Approaches Tested:**
+
+| # | Query Mode | Description |
+|---|------------|-------------|
+| 1 | LLM (baseline) | Standard LLM-generated queries |
+| 2 | Fixed q_init | Use orthogonal q_init instead of random |
+| 3 | Diversity loss | Add penalty for query similarity |
+| 4 | Orthogonal | Project queries to be orthogonal to q_static |
+| 5 | Random | Completely random queries per frame |
+
+**Results:**
+
+| Experiment | Ratio | Fine Loss | Coarse Loss | Result |
+|------------|-------|-----------|-------------|--------|
+| 1_baseline_llm | 1.0007 | 0.5907 | 0.5911 | ✗ No gap |
+| 2_fixed_qinit | 1.0042 | 0.5708 | 0.5732 | ✗ No gap |
+| 3_diversity_loss | 1.0005 | 0.5302 | 0.5304 | ✗ No gap |
+| 4_orthogonal | 0.9999 | 0.5408 | 0.5408 | ✗ No gap |
+| 5_random | 1.0000 | 0.5406 | 0.5406 | ✗ No gap |
+
+**CRITICAL FINDING:**
+
+Even with **completely random queries** (experiment 5), the ratio stays at 1.0!
+
+This definitively proves:
+1. Query diversity is NOT the issue
+2. The task itself doesn't benefit from foveated attention
+3. **Next-frame VAE latent prediction is solvable with ANY weighted average of patches**
+
+**Why This Makes Sense:**
+
+VAE latents encode global image structure (mean color, layout, textures). This information is distributed across ALL patches uniformly. Whether you attend to top-left or bottom-right, you get similar reconstruction-relevant information.
+
+**Conclusion:**
+
+The core hypothesis is fundamentally unsuited for this task. To validate foveated attention, we need tasks that REQUIRE spatial selectivity:
+
+1. **Object tracking:** "Where did the red ball go?" - forces focus on specific regions
+2. **Sparse reconstruction:** Predict only 25% of patches - forces strategic selection
+3. **Action recognition:** "Is the person walking or running?" - requires motion-focused attention
+4. **Region-specific QA:** "What color is the object in the top-left?" - requires spatial focus
+
+**wandb:** https://wandb.ai/sanjayanps/foveated-vlm-query-diversity
+
+---
+
+## Final Conclusions (2026-01-07)
+
+After extensive experimentation over 3+ days:
+
+### What Works:
+- ✅ Deep query attention mechanism (different queries → different features)
+- ✅ Training converges and reduces loss (0.79 → 0.21)
+- ✅ Model uses visual features h (not just copying prev_latents)
+- ✅ Attention is more focused in fine pass (1.8x focus ratio)
+
+### What Doesn't Work:
+- ❌ LLM generates near-identical queries across frames (92-98% similar)
+- ❌ Even forced query diversity doesn't create ratio > 1.0
+- ❌ Multi-pass refinement doesn't help
+- ❌ Longer sequences don't help
+
+### Root Cause:
+**The task (next-frame VAE latent prediction) doesn't require foveated attention.**
+
+VAE latents encode global structure available in ANY weighted average of patches. The task is fundamentally "global" - spatial selectivity provides no advantage.
+
+### Recommendation:
+To validate the foveated attention hypothesis, redesign the task to require spatial selectivity:
+1. Object tracking / visual question answering
+2. Sparse patch reconstruction
+3. Action recognition
+4. Longer-horizon prediction (t+5, t+10)
+
+---
+
 ## Quick Reference
 
 ### Debugging loss_fine == loss_coarse
@@ -642,4 +781,4 @@ Next-frame latent prediction is solvable with ANY weighted average of patches. T
 
 ---
 
-*Last updated: 2026-01-07*
+*Last updated: 2026-01-08*
