@@ -378,5 +378,58 @@ When `loss_fine == loss_coarse` (or ratio stays at 1.0):
 
 ---
 
-*Last updated: 2026-01-04*
+## Code Organization Rules
+
+**FOLLOW THESE RULES to prevent codebase chaos:**
+
+### Script Naming Conventions
+
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `train_*.py` | Full training scripts (checkpoints, logging) | `train_captioning_scaled.py` |
+| `experiment_*.py` | Quick experiments (testing hypotheses) | `experiment_sparse_frames.py` |
+| `evaluate_*.py` | Model evaluation | `evaluate_24h.py` |
+| `visualize_*.py` | Generate visualizations | `visualize_captioning.py` |
+| `diagnostic_*.py` | Debug/analysis scripts | `diagnostic_attention.py` |
+
+### Output Directory Conventions
+
+| Directory Pattern | Purpose |
+|-------------------|---------|
+| `outputs/{experiment_name}/` | Main experiment outputs |
+| `outputs/{experiment_name}/checkpoints/` | Model checkpoints |
+| `outputs/{experiment_name}/visualizations/` | Generated images/GIFs |
+| `outputs/{experiment_name}.log` | Training logs |
+
+### When Creating New Experiments
+
+1. **Create ONE script** per experiment (not multiple related scripts)
+2. **Use clear naming** that describes the hypothesis being tested
+3. **Add wandb logging** with project name `foveated-vlm-{experiment-type}`
+4. **Document in KNOWLEDGE.md** immediately after running:
+   - Hypothesis
+   - Configuration
+   - Results (ratio, loss)
+   - Conclusion (VALIDATED/FAILED)
+5. **Update Script Reference** table in KNOWLEDGE.md
+
+### What NOT to Do
+
+- ❌ Create multiple scripts that do similar things
+- ❌ Leave undocumented experiments in outputs/
+- ❌ Mix experiment code into training scripts
+- ❌ Create new output dirs without updating KNOWLEDGE.md
+- ❌ Run experiments without wandb (makes tracking impossible)
+
+### Documentation Requirements
+
+After EVERY experiment:
+1. Add entry to KNOWLEDGE.md Experiment History
+2. Update Script Reference table if new script
+3. Update Output Directory Guide if new outputs
+4. Commit with descriptive message: `feat: Add {experiment} - {one-line result}`
+
+---
+
+*Last updated: 2026-01-10*
 *For questions, refer to core_docs/ or consult with team*
