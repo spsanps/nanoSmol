@@ -212,7 +212,7 @@ def normalize_frames(frames: torch.Tensor) -> torch.Tensor:
 
 
 def webvid_sparse_generator(num_frames=8, frame_size=256, target_fps=1.0,
-                            min_duration=10, max_duration=30):
+                            min_duration=10, max_duration=30, verbose=True):
     """Generator for WebVid samples with sparse frame extraction.
 
     Args:
@@ -221,15 +221,31 @@ def webvid_sparse_generator(num_frames=8, frame_size=256, target_fps=1.0,
         target_fps: Target FPS (1.0 = 1 frame per second)
         min_duration: Minimum video duration (ensures enough temporal span)
         max_duration: Maximum video duration
+        verbose: Print progress info
     """
     ds = load_dataset('TempoFunk/webvid-10M', split='train', streaming=True)
 
+    samples_checked = 0
+    samples_skipped_duration = 0
+    samples_skipped_download = 0
+    samples_skipped_extract = 0
+    samples_yielded = 0
+
     for sample in ds:
+        samples_checked += 1
+
+        # Progress logging every 50 samples
+        if verbose and samples_checked % 50 == 0:
+            print(f"[Data] Checked {samples_checked} | Yielded {samples_yielded} | "
+                  f"Skip: dur={samples_skipped_duration} dl={samples_skipped_download} "
+                  f"ext={samples_skipped_extract}", flush=True)
+
         try:
             duration = parse_duration(sample.get('duration', ''))
 
             # Need longer videos for sparse sampling
             if duration < min_duration or duration > max_duration:
+                samples_skipped_duration += 1
                 continue
 
             url = sample.get('contentUrl')
@@ -240,6 +256,7 @@ def webvid_sparse_generator(num_frames=8, frame_size=256, target_fps=1.0,
 
             video_bytes = download_video(url)
             if video_bytes is None:
+                samples_skipped_download += 1
                 continue
 
             context_frames, target_frame = extract_sparse_frames(
@@ -247,7 +264,13 @@ def webvid_sparse_generator(num_frames=8, frame_size=256, target_fps=1.0,
             )
 
             if context_frames is None:
+                samples_skipped_extract += 1
                 continue
+
+            samples_yielded += 1
+            if verbose and samples_yielded <= 3:
+                print(f"[Data] Got sample {samples_yielded}: {duration}s video, "
+                      f"'{caption[:50]}...'", flush=True)
 
             yield context_frames, target_frame, caption, duration
 
@@ -269,16 +292,16 @@ def main(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print("=" * 70)
-    print("SPARSE FRAME RECONSTRUCTION EXPERIMENT")
-    print("=" * 70)
-    print(f"Device: {device}")
-    print(f"Steps: {steps}")
-    print(f"Batch: {batch_size} x {grad_accum} = {batch_size * grad_accum}")
-    print(f"Frames: {num_frames} context + 1 target")
-    print(f"Target FPS: {target_fps} (frame every {1/target_fps:.1f}s)")
-    print(f"Min video duration: {min_duration}s")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print("SPARSE FRAME RECONSTRUCTION EXPERIMENT", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Device: {device}", flush=True)
+    print(f"Steps: {steps}", flush=True)
+    print(f"Batch: {batch_size} x {grad_accum} = {batch_size * grad_accum}", flush=True)
+    print(f"Frames: {num_frames} context + 1 target", flush=True)
+    print(f"Target FPS: {target_fps} (frame every {1/target_fps:.1f}s)", flush=True)
+    print(f"Min video duration: {min_duration}s", flush=True)
+    print("=" * 70, flush=True)
 
     if use_wandb:
         import wandb
@@ -297,7 +320,7 @@ def main(
         )
 
     # Load model
-    print("\nLoading model...")
+    print("\nLoading model...", flush=True)
     model = FoveatedVideoModel(
         dino_model="facebook/dinov2-small",
         llm_model="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -306,7 +329,7 @@ def main(
     ).to(device)
 
     # Load VAE for encoding targets
-    print("Loading VAE...")
+    print("Loading VAE...", flush=True)
     vae = load_vae(device)
 
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
@@ -331,8 +354,8 @@ def main(
 
     ratio_history = []
 
-    print("\nStarting training...")
-    print("(Looking for longer videos with sparse frames)")
+    print("\nStarting training...", flush=True)
+    print("(Looking for longer videos with sparse frames)", flush=True)
 
     while step < steps:
         optimizer.zero_grad()
@@ -345,7 +368,7 @@ def main(
             try:
                 context_frames, target_frame, caption, duration = next(data_gen)
             except StopIteration:
-                print("Data exhausted, restarting...")
+                print("Data exhausted, restarting...", flush=True)
                 data_gen = webvid_sparse_generator(
                     num_frames=num_frames,
                     target_fps=target_fps,
@@ -415,7 +438,7 @@ def main(
                 status = "FINE_BETTER" if avg_ratio > 1.0 else "COARSE_BETTER"
 
                 print(f"Step {step:4d} | fine={avg_fine:.4f} coarse={avg_coarse:.4f} | "
-                      f"ratio={ratio:.4f} ({status})")
+                      f"ratio={ratio:.4f} ({status})", flush=True)
 
                 if use_wandb:
                     wandb.log({

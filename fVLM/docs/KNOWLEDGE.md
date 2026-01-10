@@ -70,6 +70,7 @@ A novel vision-language model that processes video frame-by-frame with **ONE tok
 | `preliminary_experiments.py` | Initial diagnostics | Features 98.75% similar |
 | `ablation_experiments.py` | Short ablations (500 steps) | None >1.05 ratio |
 | `comprehensive_ablations.py` | Long ablations (1500 steps) | None >1.05 ratio |
+| `experiment_sparse_frames.py` | Sparse temporal sampling (1 FPS) | ratio=1.0, sparsity doesn't help |
 
 ### Evaluation Scripts
 
@@ -96,6 +97,7 @@ A novel vision-language model that processes video frame-by-frame with **ONE tok
 2026-01-07: Diagnostic analysis (LLM generates identical queries)
 2026-01-08: Captioning experiment (BREAKTHROUGH: ratio=1.05!)
 2026-01-09: Scaled captioning (5000 steps, ratio=1.15, VALIDATED)
+2026-01-10: Sparse frames experiment (1 FPS, ratio=1.0, FAILED)
 ```
 
 ### Key Experiments Summary
@@ -108,6 +110,7 @@ A novel vision-language model that processes video frame-by-frame with **ONE tok
 | 01-07 | Query diversity | `experiment_query_diversity.py` | ratio=1.00 | FAILED |
 | 01-08 | Captioning (fast) | `experiment_captioning_fast.py` | ratio=1.05 | SUCCESS |
 | 01-09 | Captioning (scaled) | `train_captioning_scaled.py` | ratio=1.15 | SUCCESS |
+| 01-10 | Sparse frames (1 FPS) | `experiment_sparse_frames.py` | ratio=1.00 | FAILED |
 
 ---
 
@@ -1017,6 +1020,48 @@ The foveated attention hypothesis is **validated for semantic tasks**:
 - Captioning (understand semantics): ratio = 1.15+ (15%+ benefit)
 
 This suggests foveated attention is most valuable when the downstream task requires semantic understanding rather than global statistics.
+
+---
+
+### Sparse Frames Experiment (2026-01-10)
+
+**Purpose:** Test if temporal sparsity (frames far apart) helps foveated attention for reconstruction.
+
+**Hypothesis:** If frames are 1+ seconds apart, more motion/change between frames requires understanding dynamics, which should benefit foveated attention.
+
+**Script:** `scripts/experiment_sparse_frames.py`
+
+**Configuration:**
+```yaml
+target_fps: 1.0  # 1 frame per second (very sparse)
+min_duration: 10s  # 10+ second videos only
+num_frames: 8  # context frames
+steps: 500
+batch_size: 2 x 4 = 8 effective
+```
+
+**Results:**
+
+| Metric | Value |
+|--------|-------|
+| Average ratio | **0.9992** |
+| Steps with ratio > 1.0 | 46.4% |
+| Peak ratio | 1.0370 |
+| Min ratio | 0.9720 |
+| Loss progression | 0.85 → 0.45 |
+
+**Verdict:** ✗ NOT VALIDATED
+
+Even with 1 second between frames (significant temporal gap), ratio stays at ~1.0. Sparse frames do NOT help reconstruction tasks benefit from foveated attention.
+
+**Key Insight:** The issue is fundamental to VAE latent reconstruction:
+- VAE latents encode **global structure** (overall appearance, colors, layout)
+- Global structure is available in ANY weighted average of patches
+- Whether frames are dense or sparse, reconstruction doesn't need spatial selectivity
+
+**Conclusion:** Temporal sparsity doesn't solve the reconstruction problem. Only semantic tasks (captioning) benefit from foveated attention.
+
+**wandb:** https://wandb.ai/sanjayanps/foveated-vlm-sparse/runs/b5x1aymp
 
 ---
 
