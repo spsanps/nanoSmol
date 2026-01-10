@@ -12,11 +12,133 @@
 
 ## Table of Contents
 
-1. [Critical Bugs & Fixes](#critical-bugs--fixes)
-2. [Training Insights](#training-insights)
-3. [Architecture Notes](#architecture-notes)
-4. [Performance Optimizations](#performance-optimizations)
-5. [Experiment History](#experiment-history)
+1. [Executive Summary](#executive-summary)
+2. [Script Reference](#script-reference)
+3. [Experiment Roadmap](#experiment-roadmap)
+4. [Output Directory Guide](#output-directory-guide)
+5. [Critical Bugs & Fixes](#critical-bugs--fixes)
+6. [Training Insights](#training-insights)
+7. [Architecture Notes](#architecture-notes)
+8. [Performance Optimizations](#performance-optimizations)
+9. [Experiment History (Detailed)](#experiment-history)
+
+---
+
+## Executive Summary
+
+### What Is This Project?
+A novel vision-language model that processes video frame-by-frame with **ONE token per frame** (not 196+ patches). The LLM controls WHERE to look in each frame via foveated attention, inspired by biological vision.
+
+### Core Hypothesis
+**Success metric:** `loss_fine < loss_coarse` (ratio > 1.0)
+- Fine (dynamic queries from LLM) should outperform Coarse (static query)
+- 5-15% improvement = PoC successful
+
+### Final Conclusion (2026-01-09)
+
+| Task | Result | Ratio | Conclusion |
+|------|--------|-------|------------|
+| **Reconstruction** (VAE latents) | FAILED | ~1.00 | Global task doesn't need foveated attention |
+| **Captioning** (semantic) | SUCCESS | ~1.15 | Semantic tasks benefit from foveated attention |
+
+**The hypothesis is validated for SEMANTIC tasks, not reconstruction tasks.**
+
+---
+
+## Script Reference
+
+### Training Scripts
+
+| Script | Purpose | Status | Output Dir |
+|--------|---------|--------|------------|
+| `train_multitask.py` | Multi-task training (reconstruction + caption) | Stable | `multitask/` |
+| `train_large_scale.py` | 24h streaming training | Fixed | `large_scale_24h*/` |
+| `train_captioning_scaled.py` | **BEST**: Captioning-only training | SUCCESS | `captioning_scaled/` |
+| `train_freeze_dino.py` | Training with frozen DINO | Tested | `freeze_dino*/` |
+| `train_phase1.py` | Phase 1: Reconstruction only | Legacy | `phase1/` |
+| `train_phase2.py` | Phase 2: Text-conditioned | Legacy | `phase2/` |
+
+### Experiment Scripts
+
+| Script | Purpose | Key Finding |
+|--------|---------|-------------|
+| `experiment_captioning_fast.py` | Quick captioning test (800 steps) | ratio=1.05 |
+| `experiment_multipass_local.py` | Multi-pass refinement test | No improvement |
+| `experiment_attention_fixes.py` | Temp, contrastive, top-k tests | Contrastive separates features but ratio=1.0 |
+| `experiment_query_diversity.py` | Force diverse queries | Even random queries have ratio=1.0 |
+| `diagnostic_attention.py` | Deep attention analysis | LLM generates near-identical queries |
+| `preliminary_experiments.py` | Initial diagnostics | Features 98.75% similar |
+| `ablation_experiments.py` | Short ablations (500 steps) | None >1.05 ratio |
+| `comprehensive_ablations.py` | Long ablations (1500 steps) | None >1.05 ratio |
+
+### Evaluation Scripts
+
+| Script | Purpose | Output |
+|--------|---------|--------|
+| `evaluate_24h.py` | Full eval of 24h checkpoint | `eval_24h/EVALUATION_REPORT.md` |
+| `visualize_captioning.py` | Generate captioning visualizations | `visualizations_final/` |
+| `visualize_attention.py` | Attention overlays | Various |
+| `generate_fast_gifs.py` | Quick attention GIFs | `fast_gifs/` |
+
+---
+
+## Experiment Roadmap
+
+### Timeline
+
+```
+2026-01-01 to 01-03: Phase 1 & 2 (initial training, discovered ratio=1.0 bug)
+2026-01-04: Bug fixes (query init, projection bias, per-batch mode)
+2026-01-04: Large-scale 24h training (26K steps, ratio still 1.0)
+2026-01-06: Eval + Preliminary experiments (found 98.75% feature similarity)
+2026-01-06: Ablation experiments (temp, contrastive, freeze DINO)
+2026-01-07: Multi-pass + Query diversity experiments (no improvement)
+2026-01-07: Diagnostic analysis (LLM generates identical queries)
+2026-01-08: Captioning experiment (BREAKTHROUGH: ratio=1.05!)
+2026-01-09: Scaled captioning (5000 steps, ratio=1.15, VALIDATED)
+```
+
+### Key Experiments Summary
+
+| Date | Experiment | Script | Result | Verdict |
+|------|------------|--------|--------|---------|
+| 01-04 | 24h reconstruction | `train_large_scale.py` | ratio=1.00 | FAILED |
+| 01-06 | Ablations | `comprehensive_ablations.py` | ratio<=1.00 | FAILED |
+| 01-07 | Multi-pass | `experiment_multipass_local.py` | ratio=1.00 | FAILED |
+| 01-07 | Query diversity | `experiment_query_diversity.py` | ratio=1.00 | FAILED |
+| 01-08 | Captioning (fast) | `experiment_captioning_fast.py` | ratio=1.05 | SUCCESS |
+| 01-09 | Captioning (scaled) | `train_captioning_scaled.py` | ratio=1.15 | SUCCESS |
+
+---
+
+## Output Directory Guide
+
+### Good Outputs (Use These)
+
+| Directory | Description | Quality |
+|-----------|-------------|---------|
+| `captioning_scaled/` | Final validated experiment, 5K steps | BEST |
+| `visualizations_final/` | Final captioning visualizations | BEST |
+| `diverse_64/` | 64 diverse attention GIF examples | GOOD |
+| `eval_24h/` | Comprehensive 24h eval report | GOOD |
+
+### Intermediate Outputs (For Reference)
+
+| Directory | Description |
+|-----------|-------------|
+| `comprehensive_ablations/` | Long ablation results |
+| `multipass_experiments/` | Multi-pass test results |
+| `preliminary_experiments/` | Diagnostic analysis results |
+| `large_scale_24h_deep_v3/` | Final 24h checkpoint |
+
+### Legacy/Test Outputs (Can Ignore)
+
+| Directory | Notes |
+|-----------|-------|
+| `checkpoints_old_nan_gradients/` | Old buggy checkpoints |
+| `test_bs*`, `test_fix*`, `test_large/` | Test runs |
+| `smolvlm*/` | Alternative model experiments |
+| `streaming*`, `phase2/` | Early experiments |
 
 ---
 
@@ -264,6 +386,8 @@ to overcome the projection layer and produce meaningful attention patterns.
 ---
 
 ## Experiment History
+
+> Note: The experiments below are in chronological order. See the [Experiment Roadmap](#experiment-roadmap) section above for a summary table.
 
 ### Phase 1: Self-Supervised (WebVid 813 samples)
 - Final loss: 0.34
@@ -793,15 +917,25 @@ To validate the foveated attention hypothesis, redesign the task to require spat
 
 **Key Change:** Train on captioning ONLY (cross-entropy loss), compare fine vs coarse.
 
-**Results (460+ steps, still running):**
+**Results (800 steps, COMPLETED):**
 
 | Metric | Value |
 |--------|-------|
-| Ratios > 1.0 | 100% (17/17) |
-| Ratios > 1.05 | 88.2% |
-| Ratios > 1.1 | 64.7% |
-| Mean ratio | 1.140 |
-| Best ratio_avg20 | 1.289 |
+| Final ratio (avg50) | **1.0518** |
+| All steps ratio > 1.0 | 100% (32/32 logged) |
+| Peak ratio | 1.307 (step 350) |
+| Lowest ratio | 1.020 (step 300) |
+| Success rate | 100% |
+
+**Sample Caption Comparisons (qualitative):**
+
+| GT | Fine Caption | Coarse Caption |
+|----|--------------|----------------|
+| Mother and daughter preparing vegetables on grill | Happy couple eating meat on table | Aerial view of cloud of silver water drops |
+| Pretty businesswoman works on tablet | Female child with face made of grass watching camera | Young woman with beautiful smile |
+| Thai pretty woman taking selfie | Nighttime sunrise. sunset. | AP Cand regular dock and Fido walking |
+
+Note: Captions are still low quality (small model, limited training), but the key finding is that **fine queries produce lower loss consistently**.
 
 **Key Finding:**
 
@@ -825,4 +959,90 @@ These are spatially localized features that benefit from selective attention.
 
 ---
 
-*Last updated: 2026-01-08*
+### Scaled Captioning Experiment: Strong Validation (2026-01-09)
+
+**Purpose:** Scale up captioning experiment to 5000 steps with checkpoints and visualizations.
+
+**Script:** `scripts/train_captioning_scaled.py`
+
+**Configuration:**
+- Steps: 5000
+- Batch: 2 × 4 = 8 effective
+- LR: 3e-5 with 100-step warmup
+- Checkpoints: Every 1000 steps
+- Visualizations: Every 500 steps
+
+**Results (5000 steps, COMPLETED):**
+
+| Metric | Value |
+|--------|-------|
+| Final ratio (avg100) | **1.1553** |
+| All steps ratio > 1.0 | 100% |
+| Peak ratio | 1.3397 (step 4475) |
+| Avg ratio | ~1.15 (15% improvement!) |
+| Training time | ~23 hours |
+
+**Checkpoints saved:**
+- `outputs/captioning_scaled/checkpoints/step_001000.pt`
+- `outputs/captioning_scaled/checkpoints/step_002000.pt`
+- `outputs/captioning_scaled/checkpoints/step_003000.pt`
+- `outputs/captioning_scaled/checkpoints/step_004000.pt`
+- `outputs/captioning_scaled/checkpoints/step_005000.pt`
+
+**Sample Caption Comparisons (step 5000):**
+
+| GT | Fine Caption | Coarse Caption |
+|----|--------------|----------------|
+| Swimming in pool, slow motion | Close up of legs of man running in pool, jumping into water | S-3447:4k intro, alpha channel |
+| Young woman using smartphone in cafe | Woman eating smoothie with fruits on wooden table | Cancer rehabilitation treatment |
+| Japanese office skyscrapers | Sunrise timelapse in Chonburi Thailand | 3D animation of female artists with brushes |
+
+**Key Findings:**
+
+1. **Ratio improved from 1.05 (800 steps) to 1.15 (5000 steps)** - benefit increases with more training
+2. **100% FINE_BETTER** - dynamic queries never performed worse than static
+3. **Fine captions are semantically coherent** - describe actual scenes (people, actions, objects)
+4. **Coarse captions are often gibberish** - unrelated content, format artifacts
+
+**Generated Visualizations:**
+- `outputs/visualizations_final/sample_*.png` - Attention overlays with caption comparisons
+- `outputs/visualizations_final/attention_anim_*.gif` - Animated attention sequences
+
+**wandb:** https://wandb.ai/sanjayanps/foveated-vlm-captioning/runs/we7hsvwu
+
+**Conclusion:**
+
+The foveated attention hypothesis is **validated for semantic tasks**:
+- Reconstruction (predict pixels): ratio ≈ 1.0 (no benefit)
+- Captioning (understand semantics): ratio = 1.15+ (15%+ benefit)
+
+This suggests foveated attention is most valuable when the downstream task requires semantic understanding rather than global statistics.
+
+---
+
+## Future Work & Open Questions
+
+### Recommended Next Steps
+
+1. **Scale captioning further**: Train for 10K-20K steps to see if ratio continues to improve
+2. **Better dataset**: Try Something-Something v2 or Kinetics for more dynamic videos
+3. **Multi-query attention**: Test 4-9 queries instead of single query bottleneck
+4. **Region-specific QA**: Test on tasks like "What color is the object in top-left?"
+
+### Open Questions
+
+1. Why does captioning benefit but reconstruction doesn't?
+   - Hypothesis: VAE latents encode global structure available in ANY weighted average
+   - Captioning requires identifying specific objects/actions
+
+2. Can we improve caption quality?
+   - Current captions are low quality due to small model (135M)
+   - Try larger SmolLM or fine-tune on caption-specific data
+
+3. Would optical flow prediction work?
+   - Inherently spatial task
+   - Requires knowing WHERE objects are to predict WHERE they go
+
+---
+
+*Last updated: 2026-01-10*
