@@ -1129,6 +1129,51 @@ This is the **strongest validation of the foveated attention hypothesis** to dat
 
 ---
 
+---
+
+### Joint Reconstruction + Captioning Experiment (2026-01-12)
+
+**THESIS:**
+
+The captioning task teaches the model WHERE to look (semantically relevant regions). This learned attention pattern should ALSO help reconstruction, unlike training reconstruction alone.
+
+**Hypothesis:**
+1. Captioning-only training → ratio > 1.0 (VALIDATED: 1.12-1.20)
+2. Reconstruction-only training → ratio = 1.0 (VALIDATED: no benefit)
+3. **Joint training** → ratio > 1.0 for BOTH tasks (TESTING)
+
+**Why This Should Work:**
+- Reconstruction alone fails because VAE latents encode global structure available in ANY weighted average
+- But captioning FORCES the model to attend to specific objects/actions
+- Once the model learns to focus on semantically relevant regions for captioning...
+- ...those same regions should contain MORE predictive information for reconstruction
+- The captioning gradient teaches "what matters" which reconstruction alone cannot learn
+
+**Key Difference from 24h Multitask:**
+- Previous: Random mode switching per batch (60% recon, 20% text-cond, 20% caption)
+- NEW: Joint loss on EVERY batch: `loss = loss_caption + lambda * loss_reconstruction`
+- Both objectives train together, not alternating
+
+**Configuration:**
+```yaml
+steps: 10000
+batch_size: 2 x 4 = 8 effective
+learning_rate: 3e-5
+loss: loss_caption + 0.5 * loss_reconstruction
+checkpoints: Every 1000 steps
+```
+
+**Success Metrics:**
+- Caption ratio > 1.0 (should maintain)
+- Reconstruction ratio > 1.0 (the NEW hypothesis)
+- If reconstruction ratio improves, captioning "teaches" reconstruction
+
+**Script:** `scripts/train_joint_recon_caption.py`
+
+**Status:** IN PROGRESS
+
+---
+
 ## Future Work & Open Questions
 
 ### Recommended Next Steps
