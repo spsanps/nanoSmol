@@ -96,6 +96,42 @@ A novel vision-language model that:
 - Pass 2 (dynamic queries) should outperform Pass 1 (static query)
 - This validates that foveated attention extracts better information
 
+### CRITICAL: Autoregressive Fine vs Static Coarse (THE THESIS)
+
+**This is the fundamental difference that justifies the architecture:**
+
+**Coarse (Static) Path:**
+```
+Frame 1 → q_static → z°_1
+Frame 2 → q_static → z°_2    (same query, no temporal dependence)
+Frame 3 → q_static → z°_3
+...
+```
+- Uses the SAME static query `q_static` for ALL frames
+- No information flows between frames during feature extraction
+- Each frame is processed independently
+
+**Fine (Autoregressive) Path:**
+```
+Frame 1 → q_init → z_1 → LLM → q_1
+Frame 2 → q_1    → z_2 → LLM → q_2    (query depends on previous FINE features!)
+Frame 3 → q_2    → z_3 → LLM → q_3
+...
+```
+- Query for frame t depends on LLM processing fine features z_1...z_{t-1}
+- Each query is INFORMED by what was seen in previous frames
+- This is the "foveated" behavior - looking at frame t based on understanding of frames 0..t-1
+
+**Test Time Difference:**
+- At inference, the fine path must run SEQUENTIALLY (autoregressive)
+- The coarse path can run in PARALLEL (all frames use same query)
+- The fine path's advantage comes from this temporal information flow
+
+**Why This Matters:**
+- The fine path can learn to track objects, follow motion, anticipate changes
+- The coarse path treats each frame as independent snapshots
+- For semantic tasks (captioning, QA), this temporal awareness is crucial
+
 ### Model Stack (DO NOT DEVIATE)
 - **Vision Encoder:** DINOv3 ViT-S/16 (384-dim, trainable)
 - **Core LLM:** SmolLM2-135M-Instruct (576-dim hidden)
