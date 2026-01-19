@@ -1,0 +1,29 @@
+DINO Patch Analysis Summary
+======================================================================
+
+Videos analyzed: 100
+
+KEY FINDINGS:
+----------------------------------------
+Gap 1 (0.125s): 0.933 cosine similarity
+Gap 8 (1.0s):   0.829 cosine similarity
+Gap 12 (1.5s):  0.804 cosine similarity
+
+CLS token is MORE stable than spatial patches
+
+
+IMPLICATIONS FOR PATCH PREDICTION:
+----------------------------------------
+Baseline MSE at 1s gap: 2.0635
+This is the 'copy previous' baseline loss
+Model must beat this to show learning
+
+
+PER-GAP STATISTICS:
+----------------------------------------
+Gap    Time     Cos Sim      MSE          L1          
+1      0.12s    0.9327       0.8089       0.5621
+2      0.25s    0.9039       1.1560       0.6939
+4      0.50s    0.8696       1.5714       0.8266
+8      1.00s    0.8293       2.0635       0.9640
+12     1.50s    0.8039       2.3783       1.0446

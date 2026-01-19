@@ -1,0 +1,19 @@
+Patch Prediction Baseline Results
+======================================================================
+
+Gap: 8 frames (1.0s)
+
+Model                MSE             Cos Sim         vs Copy        
+----------------------------------------------------------------------
+copy                 2.1632          0.8205          +0.0%
+linear               3.5460          0.6414          -63.9%
+mlp                  4.0206          0.5813          -85.9%
+temporal             4.2591          0.5523          -96.9%
+
+
+KEY FINDINGS:
+----------------------------------------
+Best model: linear
+Best MSE: 3.5460 (-63.9% vs copy)
+
+Patch prediction IS learnable - model beats copy baseline!

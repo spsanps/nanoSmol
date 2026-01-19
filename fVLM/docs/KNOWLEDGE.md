@@ -1489,6 +1489,32 @@ Frame 1..T → Coarse (q_static) → z° → loss_coarse
 
 ---
 
+## Research In Progress
+
+### DINO Patch Prediction Research (2026-01-19)
+
+**Location:** `research/patch_prediction/`
+
+**Summary:** Explored replacing VAE latent prediction with DINO patch prediction as the training target.
+
+**Key Findings:**
+- DINOv2-small with 256×256 input produces 325 tokens (1 CLS + 18×18 patches), not 257
+- Patches are 93% similar at 0.125s gap, 80% similar at 1.5s gap
+- At short gaps, copying baseline wins; at longer gaps (1.5s), model beats copy by 12%
+- Storage estimate: ~400GB for 100K videos (feasible)
+
+**Blocking Issue Identified:** The FiLM prediction head broadcasts SAME gamma/beta across all spatial positions. The LLM has no per-region control over prediction - this affects BOTH current VAE prediction AND proposed patch prediction.
+
+**Decision:** Before changing to DINO patches, first experiment with non-FiLM prediction heads on existing VAE setup. This isolates the architectural choice from the target representation choice.
+
+**Files:**
+- `research/patch_prediction/README.md` - Full summary
+- `research/patch_prediction/01b_patch_analysis_local.py` - Patch similarity analysis
+- `research/patch_prediction/02_prediction_baseline.py` - Prediction baselines
+- `research/patch_prediction/03_gap_comparison.py` - Gap comparison
+
+---
+
 ## Future Work & Open Questions
 
 ### Recommended Next Steps
@@ -1497,6 +1523,7 @@ Frame 1..T → Coarse (q_static) → z° → loss_coarse
 2. **Better dataset**: Try Something-Something v2 or Kinetics for more dynamic videos
 3. **Multi-query attention**: Test 4-9 queries instead of single query bottleneck
 4. **Region-specific QA**: Test on tasks like "What color is the object in top-left?"
+5. **Non-FiLM prediction head**: Test prediction architectures that give LLM per-region control (see below)
 
 ### Open Questions
 
