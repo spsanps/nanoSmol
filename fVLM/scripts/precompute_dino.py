@@ -383,10 +383,13 @@ def main():
             if vid in existing:
                 continue
 
-            try:
-                sample_queue.put((vid, sample), timeout=5)
-            except:
-                break
+            # Keep trying to put in queue (with stop check)
+            while not stop_event.is_set():
+                try:
+                    sample_queue.put((vid, sample), timeout=5)
+                    break
+                except:
+                    continue
 
         # Signal workers to stop
         for _ in range(config["num_workers"]):
@@ -398,6 +401,7 @@ def main():
 
     # Main loop
     last_log = time.time()
+    no_progress_count = 0  # Track consecutive empty polls
 
     try:
         while True:
@@ -414,13 +418,14 @@ def main():
 
             # Get results from download workers
             try:
-                status, video_id, video_data = result_queue.get(timeout=1)
+                status, video_id, video_data = result_queue.get(timeout=2)
+                no_progress_count = 0  # Reset on any result
                 if status == "failed":
                     stats["failed"] += 1
                 elif status == "success":
                     pending_process.append(video_data)
             except Empty:
-                pass
+                no_progress_count += 1
 
             # Process batch when full
             if len(pending_process) >= process_batch_size or (len(pending_process) > 0 and time.time() - last_log > 30):
@@ -461,8 +466,8 @@ def main():
                 })
                 last_log = time.time()
 
-            # Check if done - all workers must have finished
-            if len(workers_done) >= config["num_workers"] and result_queue.empty() and len(pending_process) == 0:
+            # Check if done - all workers finished AND no progress for 10 consecutive polls
+            if len(workers_done) >= config["num_workers"] and result_queue.empty() and len(pending_process) == 0 and no_progress_count >= 5:
                 print("\n\nAll samples processed!")
                 break
 
