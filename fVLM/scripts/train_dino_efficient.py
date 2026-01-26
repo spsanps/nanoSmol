@@ -67,8 +67,8 @@ CONFIG = {
 
     # Data
     "data_dir": "/mnt/d/projects/fVLM/data/precomputed_dino_100k",
-    "num_workers": 4,
-    "pin_memory": True,
+    "num_workers": 0,  # 0 workers to avoid multiprocessing issues on WSL
+    "pin_memory": False,
 
     # Checkpointing
     "output_dir": "outputs/dino_efficient",
@@ -352,7 +352,7 @@ def format_time(seconds):
 
 def train(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"Device: {device}", flush=True)
 
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
