@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Efficient Joint + Multi-Fine Training with Precomputed DINO Features.
+Efficient JOINT Training with Precomputed DINO Features.
 
 Uses precomputed DINO patch features for maximum training efficiency:
 - Skips DINO forward pass entirely (biggest speedup)
@@ -8,6 +8,33 @@ Uses precomputed DINO patch features for maximum training efficiency:
 - Multi-fine iterations (coarse → fine₁ → fine₂)
 - Resumable checkpoints for 1-2 hour chunks
 - wandb logging with plots
+
+## CRITICAL: Joint Training with Autoregressive Captioning
+
+This script implements JOINT training with:
+1. **Caption Loss (Primary)**: Autoregressive text generation after video tokens
+2. **Reconstruction Loss (Secondary)**: Next-frame VAE latent prediction
+
+### Why Caption Loss is Essential:
+
+The caption loss teaches the model WHERE to look:
+- Reconstruction alone just learns to compress visual features
+- Caption loss provides semantic signal: "what's important in this video?"
+- The model learns to attend to regions relevant for describing the content
+- This guides the foveated attention mechanism to focus on meaningful areas
+
+### Sequence Format:
+```
+[mode_token, z_1, z_2, ..., z_T, caption_token_1, caption_token_2, ...]
+         ↑                    ↑           ↑
+         |                    |           |
+    visual features      predict these autoregressively
+```
+
+### Training Objectives:
+- loss_caption: Cross-entropy on caption tokens (positions after z_T)
+- loss_reconstruction: MSE on predicted VAE latents
+- loss = loss_caption + λ_recon * loss_reconstruction
 
 Success metric: loss_fine < loss_coarse (by 5-15%+)
 """
@@ -46,8 +73,8 @@ from src.model.prediction import PredictionHead
 CONFIG = {
     # Training
     "max_hours": 2.0,
-    "batch_size": 64,  # Optimal for RTX 4090 (14GB VRAM)
-    "grad_accum": 1,   # Effective batch = 64
+    "batch_size": 32,  # Reduced for joint training (more VRAM needed)
+    "grad_accum": 2,   # Effective batch = 64
     "num_frames": 16,  # Use 16 of 24 available frames
     "learning_rate": 1e-4,  # Higher LR for larger batch
     "weight_decay": 0.01,
@@ -58,8 +85,10 @@ CONFIG = {
     "dino_dim": 384,
     "llm_dim": 576,
     "query_dim": 384,
-    "lambda_coarse": 1.0,  # Auxiliary loss weight
+    "lambda_coarse": 1.0,  # Auxiliary loss weight for coarse pass
+    "lambda_recon": 0.1,   # Reconstruction loss weight (caption loss is primary)
     "fine_iterations": 2,  # coarse → fine₁ → fine₂
+    "max_caption_tokens": 64,  # Max caption length
 
     # Logging
     "log_interval": 25,
@@ -71,7 +100,7 @@ CONFIG = {
     "pin_memory": False,
 
     # Checkpointing
-    "output_dir": "outputs/dino_efficient",
+    "output_dir": "outputs/dino_efficient_joint",  # New dir for joint training
     "resume_checkpoint": None,
 
     # wandb
@@ -86,6 +115,10 @@ class EfficientFoveatedModel(nn.Module):
 
     Skips DINO encoder entirely - uses shallow query attention
     on precomputed patch features.
+
+    Supports JOINT training with:
+    - Caption loss (autoregressive text generation)
+    - Reconstruction loss (next-frame VAE latent prediction)
     """
 
     def __init__(
@@ -95,6 +128,7 @@ class EfficientFoveatedModel(nn.Module):
         query_dim: int = 384,
         llm_model: str = "HuggingFaceTB/SmolLM2-135M-Instruct",
         lambda_coarse: float = 1.0,
+        lambda_recon: float = 0.1,
     ):
         super().__init__()
 
@@ -102,6 +136,7 @@ class EfficientFoveatedModel(nn.Module):
         self.llm_dim = llm_dim
         self.query_dim = query_dim
         self.lambda_coarse = lambda_coarse
+        self.lambda_recon = lambda_recon
 
         # Query vectors - CRITICAL: std=1.0 for differentiation!
         self.q_static = nn.Parameter(torch.randn(1, query_dim))  # Coarse query
@@ -115,6 +150,9 @@ class EfficientFoveatedModel(nn.Module):
         self.llm.config.use_cache = False
         self.llm.config.output_hidden_states = True
 
+        # Visual scale for embedding normalization
+        self.visual_scale = nn.Parameter(torch.tensor(1.0))
+
         # Projections
         self.dino_to_llm = nn.Linear(dino_dim, llm_dim)
         self.llm_to_query = nn.Linear(llm_dim, query_dim)
@@ -123,18 +161,15 @@ class EfficientFoveatedModel(nn.Module):
         self.coarse_token = nn.Parameter(torch.randn(1, 1, llm_dim) * 0.02)
         self.fine_token = nn.Parameter(torch.randn(1, 1, llm_dim) * 0.02)
 
-        # Prediction head
+        # Prediction head for reconstruction
         self.pred_head = PredictionHead(h_dim=llm_dim, latent_channels=4)
 
-        # Empty text embedding cache
-        self._empty_text_cache = None
+        # Initial VAE latent for first frame prediction
+        self.z_vae_init = nn.Parameter(torch.zeros(1, 4, 32, 32))
 
-    def get_empty_text_embeds(self, batch_size: int) -> torch.Tensor:
-        """Get empty text embeddings for reconstruction-only training."""
-        if self._empty_text_cache is None or self._empty_text_cache.shape[0] != batch_size:
-            # Just use zeros - no text conditioning
-            self._empty_text_cache = torch.zeros(batch_size, 0, self.llm_dim)
-        return self._empty_text_cache.to(next(self.parameters()).device)
+    def get_vocab_size(self) -> int:
+        """Get vocabulary size for caption loss computation."""
+        return self.llm.config.vocab_size
 
     def query_attend(self, query: torch.Tensor, patch_features: torch.Tensor) -> torch.Tensor:
         """
@@ -159,33 +194,52 @@ class EfficientFoveatedModel(nn.Module):
         z = torch.bmm(attn_weights, patch_features)  # [B, 1, dino_dim]
         return z.squeeze(1)  # [B, dino_dim]
 
-    def forward(
+    def forward_joint(
         self,
         dino_features: torch.Tensor,
         latents: torch.Tensor,
-        text_embeds: torch.Tensor = None,
+        caption_ids: torch.Tensor,
+        caption_mask: torch.Tensor,
+        tokenizer,
         fine_iterations: int = 2,
     ):
         """
-        Forward pass with multi-fine iterations.
+        Joint forward pass with caption + reconstruction loss.
+
+        This is the CORRECT training approach:
+        - Caption loss teaches the model WHAT to look for (semantic understanding)
+        - Reconstruction loss teaches the model HOW to represent visual content
+        - Together they guide WHERE the model should attend
+
+        Sequence format: [mode_token, z_1, ..., z_T, caption_tokens...]
+                               ↑                        ↑
+                        visual features         predict these autoregressively
 
         Args:
             dino_features: [B, T, N, D] precomputed DINO patch features
             latents: [B, T, 4, 32, 32] target VAE latents
-            text_embeds: [B, N_text, llm_dim] optional text embeddings
+            caption_ids: [B, L] tokenized caption IDs
+            caption_mask: [B, L] attention mask for captions
+            tokenizer: Tokenizer for embedding and loss computation
             fine_iterations: Number of fine passes (default 2)
 
         Returns:
-            loss: Total loss
-            loss_fine: Final fine iteration loss
-            loss_coarse: Coarse pass loss
+            loss: Total loss (caption + λ * reconstruction)
+            loss_cap_fine: Final fine caption loss
+            loss_cap_coarse: Coarse caption loss
+            loss_rec_fine: Final fine reconstruction loss
+            loss_rec_coarse: Coarse reconstruction loss
         """
         B, T, N, D = dino_features.shape
         device = dino_features.device
 
-        # Empty text if not provided
-        if text_embeds is None:
-            text_embeds = self.get_empty_text_embeds(B)
+        # Embed captions using LLM's embedding layer
+        caption_embeds = self.llm.model.embed_tokens(caption_ids)  # [B, L, llm_dim]
+        caption_targets = caption_ids[:, 1:]  # Shifted targets for autoregressive loss
+
+        # prev_latents for reconstruction conditioning (first frame uses learned init)
+        z_vae_init = self.z_vae_init.expand(B, -1, -1, -1).unsqueeze(1)  # [B, 1, 4, 32, 32]
+        prev_latents = torch.cat([z_vae_init, latents[:, :-1]], dim=1)  # [B, T, 4, 32, 32]
 
         # ============================================
         # PASS 1: Coarse (static query)
@@ -201,68 +255,97 @@ class EfficientFoveatedModel(nn.Module):
             z_coarse_list.append(z_t)
         z_coarse = torch.stack(z_coarse_list, dim=1)  # [B, T, dino_dim]
 
-        # Project to LLM dimension
+        # Project to LLM dimension with normalization
         z_coarse_llm = self.dino_to_llm(z_coarse)  # [B, T, llm_dim]
+        z_coarse_llm = z_coarse_llm / (z_coarse_llm.std() + 1e-6) * self.visual_scale
 
-        # Build sequence: [coarse_token, z_coarse]
+        # Mode tokens
         coarse_tok = self.coarse_token.expand(B, -1, -1)  # [B, 1, llm_dim]
-        seq_coarse = torch.cat([coarse_tok, z_coarse_llm], dim=1)  # [B, 1+T, llm_dim]
+        fine_tok = self.fine_token.expand(B, -1, -1)
 
-        # LLM forward
-        h_coarse = self.llm(inputs_embeds=seq_coarse).hidden_states[-1]  # [B, 1+T, llm_dim]
+        # --- Coarse caption loss ---
+        # Sequence: [coarse_token, z_coarse, caption_embeds]
+        seq_cap_coarse = torch.cat([coarse_tok, z_coarse_llm, caption_embeds], dim=1)
+        outputs_cap_coarse = self.llm.model(inputs_embeds=seq_cap_coarse)
+        logits_cap_coarse = self.llm.lm_head(outputs_cap_coarse.last_hidden_state)
+        # Caption logits are at positions after [coarse_token + z_visual], excluding last
+        caption_logits_coarse = logits_cap_coarse[:, 1+T:-1, :]  # [B, L-1, vocab]
+        loss_cap_coarse = F.cross_entropy(
+            caption_logits_coarse.reshape(-1, caption_logits_coarse.size(-1)),
+            caption_targets.reshape(-1),
+            ignore_index=tokenizer.pad_token_id
+        )
 
-        # Predict latents (coarse)
-        h_for_pred = h_coarse[:, 1:-1]  # [B, T-1, llm_dim] - predict next frame
-        pred_coarse = self.pred_head(h_for_pred, latents[:, :-1])  # [B, T-1, 4, 32, 32]
-        loss_coarse = F.mse_loss(pred_coarse, latents[:, 1:])
+        # --- Coarse reconstruction loss ---
+        # Use hidden states at visual token positions for reconstruction
+        h_coarse = outputs_cap_coarse.last_hidden_state[:, 1:1+T]  # [B, T, llm_dim]
+        pred_coarse = self.pred_head(h_coarse, prev_latents)  # [B, T, 4, 32, 32]
+        loss_rec_coarse = F.mse_loss(pred_coarse, latents)
 
-        # Extract queries for fine pass
-        queries = self.llm_to_query(h_coarse[:, 1:])  # [B, T, query_dim]
+        # --- Generate queries for fine pass ---
+        queries = self.llm_to_query(h_coarse)  # [B, T, query_dim]
 
         # ============================================
         # PASS 2+: Fine iterations
         # ============================================
 
-        loss_fine = None
-        current_queries = queries
+        loss_cap_fine = None
+        loss_rec_fine = None
+        q_init = self.q_init.expand(B, -1)  # [B, query_dim]
+
+        # Build query sequence: q_init for frame 0, then shifted queries
+        current_queries = torch.cat([
+            q_init.unsqueeze(1),  # [B, 1, query_dim]
+            queries[:, :-1]       # [B, T-1, query_dim]
+        ], dim=1)  # [B, T, query_dim]
 
         for iteration in range(fine_iterations):
-            # Use q_init for first frame, shifted queries for rest
-            q_init = self.q_init.expand(B, -1)  # [B, query_dim]
-
             # Extract fine features with autoregressive queries
             z_fine_list = []
             for t in range(T):
-                if t == 0:
-                    q_t = q_init
-                else:
-                    q_t = current_queries[:, t-1]  # Query from previous frame's LLM output
-                z_t = self.query_attend(q_t, dino_features[:, t])
+                z_t = self.query_attend(current_queries[:, t], dino_features[:, t])
                 z_fine_list.append(z_t)
             z_fine = torch.stack(z_fine_list, dim=1)  # [B, T, dino_dim]
 
-            # Project to LLM dimension
+            # Project to LLM dimension with normalization
             z_fine_llm = self.dino_to_llm(z_fine)  # [B, T, llm_dim]
+            z_fine_llm = z_fine_llm / (z_fine_llm.std() + 1e-6) * self.visual_scale
 
-            # Build sequence: [fine_token, z_fine]
-            fine_tok = self.fine_token.expand(B, -1, -1)
-            seq_fine = torch.cat([fine_tok, z_fine_llm], dim=1)  # [B, 1+T, llm_dim]
+            # --- Fine caption loss ---
+            # Sequence: [fine_token, z_fine, caption_embeds]
+            seq_cap_fine = torch.cat([fine_tok, z_fine_llm, caption_embeds], dim=1)
+            outputs_cap_fine = self.llm.model(inputs_embeds=seq_cap_fine)
+            logits_cap_fine = self.llm.lm_head(outputs_cap_fine.last_hidden_state)
+            caption_logits_fine = logits_cap_fine[:, 1+T:-1, :]
+            loss_cap_fine = F.cross_entropy(
+                caption_logits_fine.reshape(-1, caption_logits_fine.size(-1)),
+                caption_targets.reshape(-1),
+                ignore_index=tokenizer.pad_token_id
+            )
 
-            # LLM forward
-            h_fine = self.llm(inputs_embeds=seq_fine).hidden_states[-1]
-
-            # Predict latents (fine)
-            h_for_pred = h_fine[:, 1:-1]
-            pred_fine = self.pred_head(h_for_pred, latents[:, :-1])
-            loss_fine = F.mse_loss(pred_fine, latents[:, 1:])
+            # --- Fine reconstruction loss ---
+            h_fine = outputs_cap_fine.last_hidden_state[:, 1:1+T]
+            pred_fine = self.pred_head(h_fine, prev_latents)
+            loss_rec_fine = F.mse_loss(pred_fine, latents)
 
             # Update queries for next iteration
-            current_queries = self.llm_to_query(h_fine[:, 1:])
+            if iteration < fine_iterations - 1:
+                next_queries = self.llm_to_query(h_fine)
+                current_queries = torch.cat([
+                    q_init.unsqueeze(1),
+                    next_queries[:, :-1]
+                ], dim=1)
 
-        # Total loss
+        # ============================================
+        # Total loss computation
+        # ============================================
+        # Caption loss is PRIMARY (teaches WHERE to look)
+        # Reconstruction loss is SECONDARY (teaches visual compression)
+        loss_coarse = loss_cap_coarse + self.lambda_recon * loss_rec_coarse
+        loss_fine = loss_cap_fine + self.lambda_recon * loss_rec_fine
         loss = loss_fine + self.lambda_coarse * loss_coarse
 
-        return loss, loss_fine, loss_coarse
+        return loss, loss_cap_fine, loss_cap_coarse, loss_rec_fine, loss_rec_coarse
 
 
 class PrecomputedDINODataset(Dataset):
@@ -308,12 +391,30 @@ class PrecomputedDINODataset(Dataset):
         }
 
 
-def collate_fn(batch):
-    return {
-        "dino_features": torch.stack([b["dino_features"] for b in batch]),
-        "latents": torch.stack([b["latents"] for b in batch]),
-        "captions": [b["caption"] for b in batch],
-    }
+def make_collate_fn(tokenizer, max_caption_tokens):
+    """Create collate function with tokenizer for caption processing."""
+    def collate_fn(batch):
+        dino_features = torch.stack([b["dino_features"] for b in batch])
+        latents = torch.stack([b["latents"] for b in batch])
+        captions = [b["caption"] for b in batch]
+
+        # Tokenize captions
+        tokenized = tokenizer(
+            captions,
+            padding="max_length",
+            truncation=True,
+            max_length=max_caption_tokens,
+            return_tensors="pt"
+        )
+
+        return {
+            "dino_features": dino_features,
+            "latents": latents,
+            "caption_ids": tokenized["input_ids"],
+            "caption_mask": tokenized["attention_mask"],
+            "captions": captions,
+        }
+    return collate_fn
 
 
 def save_checkpoint(model, optimizer, scheduler, scaler, step, epoch, metrics, config, output_dir):
@@ -359,11 +460,18 @@ def train(config):
 
     # Initialize wandb
     if HAS_WANDB:
-        run_name = config["wandb_run_name"] or f"dino_efficient_{datetime.now().strftime('%m%d_%H%M')}"
+        run_name = config["wandb_run_name"] or f"joint_efficient_{datetime.now().strftime('%m%d_%H%M')}"
         wandb.init(project=config["wandb_project"], name=run_name, config=config, resume="allow")
 
-    # Dataset
+    # Load tokenizer
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Dataset with tokenized captions
     dataset = PrecomputedDINODataset(config["data_dir"], num_frames=config["num_frames"])
+    collate_fn = make_collate_fn(tokenizer, config["max_caption_tokens"])
     dataloader = DataLoader(
         dataset, batch_size=config["batch_size"], shuffle=True,
         num_workers=config["num_workers"], pin_memory=config["pin_memory"],
@@ -380,6 +488,7 @@ def train(config):
         llm_dim=config["llm_dim"],
         query_dim=config["query_dim"],
         lambda_coarse=config["lambda_coarse"],
+        lambda_recon=config["lambda_recon"],
     ).to(device)
 
     # Count parameters
@@ -432,18 +541,32 @@ def train(config):
     start_time = time.time()
     max_runtime = config["max_hours"] * 3600
 
+    # Running metrics for averaging
     running_loss = 0.0
-    running_fine = 0.0
-    running_coarse = 0.0
+    running_cap_fine = 0.0
+    running_cap_coarse = 0.0
+    running_rec_fine = 0.0
+    running_rec_coarse = 0.0
     running_count = 0
     step_times = []
 
-    print(f"\n{'='*60}")
-    print(f"TRAINING: Joint + Multi-Fine ({config['fine_iterations']} iterations)")
+    print(f"\n{'='*70}")
+    print(f"JOINT TRAINING: Caption + Reconstruction, Multi-Fine ({config['fine_iterations']} iterations)")
+    print(f"{'='*70}")
     print(f"Max runtime: {config['max_hours']}h")
     print(f"Batch: {config['batch_size']} x {config['grad_accum']} = {config['batch_size'] * config['grad_accum']}")
     print(f"Frames: {config['num_frames']}")
-    print(f"{'='*60}\n")
+    print(f"Lambda recon: {config['lambda_recon']} (caption loss is primary)")
+    print(f"Lambda coarse: {config['lambda_coarse']}")
+    print(f"{'='*70}")
+    print()
+    print("WHY JOINT TRAINING MATTERS:")
+    print("  - Caption loss teaches WHERE to look (semantic attention)")
+    print("  - Reconstruction alone only learns visual compression")
+    print("  - Together: model learns to attend to regions that matter for understanding")
+    print()
+    print("SUCCESS METRIC: cap_fine < cap_coarse (fine path produces better captions)")
+    print(f"{'='*70}\n")
 
     optimizer.zero_grad()
     accum_count = 0
@@ -463,11 +586,13 @@ def train(config):
             # Move to device
             dino_features = batch["dino_features"].to(device)
             latents = batch["latents"].to(device)
+            caption_ids = batch["caption_ids"].to(device)
+            caption_mask = batch["caption_mask"].to(device)
 
-            # Forward
+            # Forward with joint loss
             with autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss, loss_fine, loss_coarse = model(
-                    dino_features, latents,
+                loss, cap_fine, cap_coarse, rec_fine, rec_coarse = model.forward_joint(
+                    dino_features, latents, caption_ids, caption_mask, tokenizer,
                     fine_iterations=config["fine_iterations"],
                 )
                 loss = loss / config["grad_accum"]
@@ -478,8 +603,10 @@ def train(config):
 
             # Track metrics
             running_loss += loss.item() * config["grad_accum"]
-            running_fine += loss_fine.item()
-            running_coarse += loss_coarse.item()
+            running_cap_fine += cap_fine.item()
+            running_cap_coarse += cap_coarse.item()
+            running_rec_fine += rec_fine.item()
+            running_rec_coarse += rec_coarse.item()
             running_count += 1
 
             # Optimizer step
@@ -501,46 +628,56 @@ def train(config):
                 # Logging
                 if global_step % config["log_interval"] == 0:
                     avg_loss = running_loss / running_count
-                    avg_fine = running_fine / running_count
-                    avg_coarse = running_coarse / running_count
-                    ratio = avg_coarse / avg_fine if avg_fine > 0 else 1.0
-                    improvement = (ratio - 1.0) * 100
+                    avg_cap_fine = running_cap_fine / running_count
+                    avg_cap_coarse = running_cap_coarse / running_count
+                    avg_rec_fine = running_rec_fine / running_count
+                    avg_rec_coarse = running_rec_coarse / running_count
 
-                    avg_step = sum(step_times) / len(step_times)
+                    # Caption ratio (primary metric)
+                    cap_ratio = avg_cap_coarse / avg_cap_fine if avg_cap_fine > 0 else 1.0
+                    cap_improvement = (cap_ratio - 1.0) * 100
+
+                    # Reconstruction ratio (secondary)
+                    rec_ratio = avg_rec_coarse / avg_rec_fine if avg_rec_fine > 0 else 1.0
+
                     remaining = max_runtime - elapsed
                     eta = format_time(remaining)
                     progress = elapsed / max_runtime * 100
 
-                    # Key metric: loss_fine < loss_coarse means hypothesis validated
-                    status = "✓" if ratio > 1.0 else "✗"
+                    # Key metric: caption_fine < caption_coarse means hypothesis validated
+                    status = "✓" if cap_ratio > 1.0 else "✗"
 
-                    print(f"Step {global_step:5d} | Loss: {avg_loss:.4f} | "
-                          f"Fine: {avg_fine:.4f} | Coarse: {avg_coarse:.4f} | "
-                          f"Ratio: {ratio:.3f} ({improvement:+.1f}%) {status} | "
-                          f"LR: {scheduler.get_last_lr()[0]:.1e} | "
-                          f"Progress: {progress:.0f}% | ETA: {eta}")
+                    print(f"Step {global_step:5d} | Loss: {avg_loss:.3f} | "
+                          f"Cap[F:{avg_cap_fine:.3f} C:{avg_cap_coarse:.3f} R:{cap_ratio:.3f}] {status} | "
+                          f"Rec[F:{avg_rec_fine:.3f} C:{avg_rec_coarse:.3f}] | "
+                          f"LR: {scheduler.get_last_lr()[0]:.1e} | {progress:.0f}% | ETA: {eta}")
 
                     if HAS_WANDB:
                         wandb.log({
                             "loss": avg_loss,
-                            "loss_fine": avg_fine,
-                            "loss_coarse": avg_coarse,
-                            "ratio": ratio,
-                            "improvement_pct": improvement,
+                            "cap_fine": avg_cap_fine,
+                            "cap_coarse": avg_cap_coarse,
+                            "cap_ratio": cap_ratio,
+                            "cap_improvement_pct": cap_improvement,
+                            "rec_fine": avg_rec_fine,
+                            "rec_coarse": avg_rec_coarse,
+                            "rec_ratio": rec_ratio,
                             "lr": scheduler.get_last_lr()[0],
                             "step": global_step,
                             "epoch": epoch,
                         })
 
+                    # Track history (primary metric is caption ratio)
                     metrics_history["loss"].append(avg_loss)
-                    metrics_history["loss_fine"].append(avg_fine)
-                    metrics_history["loss_coarse"].append(avg_coarse)
-                    metrics_history["ratio"].append(ratio)
+                    metrics_history["loss_fine"].append(avg_cap_fine)
+                    metrics_history["loss_coarse"].append(avg_cap_coarse)
+                    metrics_history["ratio"].append(cap_ratio)
 
-                    if ratio > best_ratio:
-                        best_ratio = ratio
+                    if cap_ratio > best_ratio:
+                        best_ratio = cap_ratio
 
-                    running_loss = running_fine = running_coarse = 0.0
+                    running_loss = running_cap_fine = running_cap_coarse = 0.0
+                    running_rec_fine = running_rec_coarse = 0.0
                     running_count = 0
 
                 # Save checkpoint
@@ -558,22 +695,25 @@ def train(config):
 
     # Summary
     elapsed_hours = (time.time() - start_time) / 3600
-    print(f"\n{'='*60}")
-    print("TRAINING COMPLETE")
-    print(f"{'='*60}")
+    print(f"\n{'='*70}")
+    print("JOINT TRAINING COMPLETE")
+    print(f"{'='*70}")
     print(f"Steps: {global_step}")
     print(f"Runtime: {elapsed_hours:.2f}h")
-    print(f"Best ratio: {best_ratio:.3f}")
+    print(f"Best caption ratio: {best_ratio:.3f}")
 
     if metrics_history["ratio"]:
         final_ratio = metrics_history["ratio"][-1]
-        print(f"Final ratio: {final_ratio:.3f}")
+        print(f"Final caption ratio: {final_ratio:.3f}")
         if final_ratio > 1.0:
-            print(f"✓ HYPOTHESIS VALIDATED: loss_fine < loss_coarse by {(final_ratio-1)*100:.1f}%")
+            print(f"✓ HYPOTHESIS VALIDATED: cap_fine < cap_coarse by {(final_ratio-1)*100:.1f}%")
+            print(f"  → Fine path produces better captions than coarse path")
+            print(f"  → Autoregressive queries guided by previous frames help!")
         else:
-            print(f"✗ Hypothesis not yet validated (needs more training)")
+            print(f"✗ Hypothesis not yet validated")
+            print(f"  → May need more training or hyperparameter tuning")
 
-    print(f"{'='*60}")
+    print(f"{'='*70}")
 
     if HAS_WANDB:
         wandb.finish()
