@@ -57,8 +57,8 @@ CONFIG = {
     "max_duration": 60,  # seconds
 
     # Performance
-    "prefetch_threads": 2,
-    "prefetch_queue_size": 16,
+    "prefetch_threads": 1,  # Single thread to avoid iterator race conditions
+    "prefetch_queue_size": 8,
     "download_timeout": 30,
 
     # Limits (0 = unlimited)
@@ -213,9 +213,9 @@ class VAEEncoder:
         ).to(device)
         self.vae.eval()
 
-        # ImageNet normalization
-        self.mean = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1).to(device)
-        self.std = torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1).to(device)
+        # ImageNet normalization (must be bfloat16 to match VAE)
+        self.mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.bfloat16).view(1, 3, 1, 1).to(device)
+        self.std = torch.tensor([0.5, 0.5, 0.5], dtype=torch.bfloat16).view(1, 3, 1, 1).to(device)
 
     @torch.no_grad()
     def encode(self, frames: torch.Tensor) -> torch.Tensor:
@@ -247,6 +247,10 @@ class VideoPrefetcher:
         self.queue = Queue(maxsize=config["prefetch_queue_size"])
         self.stop_flag = False
 
+        # Lock for thread-safe iterator access
+        from threading import Lock
+        self.iter_lock = Lock()
+
         self.threads = []
         for _ in range(config["prefetch_threads"]):
             t = Thread(target=self._worker, daemon=True)
@@ -254,28 +258,41 @@ class VideoPrefetcher:
             self.threads.append(t)
 
     def _worker(self):
+        samples_seen = 0
         while not self.stop_flag:
             try:
-                sample = next(self.dataset_iter)
+                with self.iter_lock:
+                    sample = next(self.dataset_iter)
+                samples_seen += 1
             except StopIteration:
+                print(f"[Prefetcher] Dataset exhausted after {samples_seen} samples", flush=True)
                 break
 
             # Filter by duration
             duration = parse_duration(sample.get('duration', 'PT0S'))
             if duration < self.config["min_duration"] or duration > self.config["max_duration"]:
+                if samples_seen <= 5 or samples_seen % 100 == 0:
+                    print(f"[Prefetcher] Skip (duration {duration}s not in [{self.config['min_duration']}-{self.config['max_duration']}])", flush=True)
                 continue
 
             url = sample.get('contentUrl', '')
             if not url:
+                print(f"[Prefetcher] Skip (no URL)", flush=True)
                 continue
 
             try:
+                if samples_seen <= 5:
+                    print(f"[Prefetcher] Downloading video {samples_seen}... (dur={duration}s)", flush=True)
                 video_bytes = download_video(url, self.config["download_timeout"])
+                if samples_seen <= 5:
+                    print(f"[Prefetcher] Downloaded {len(video_bytes)} bytes, extracting frames...", flush=True)
                 frames = extract_frames_fast(
                     video_bytes,
                     self.config["num_frames"],
                     self.config["frame_size"]
                 )
+                if samples_seen <= 5:
+                    print(f"[Prefetcher] Extracted {frames.shape}, adding to queue...", flush=True)
 
                 self.queue.put({
                     'video_id': sample.get('videoid', ''),
@@ -283,9 +300,14 @@ class VideoPrefetcher:
                     'duration': duration,
                     'frames': frames,
                 }, timeout=60)
+                if samples_seen <= 5:
+                    print(f"[Prefetcher] Video {samples_seen} queued!", flush=True)
 
             except Exception as e:
-                # Skip failed videos
+                # Log and skip failed videos
+                import traceback
+                print(f"[Prefetcher] Failed video {samples_seen}: {e}", flush=True)
+                traceback.print_exc()
                 continue
 
     def get(self, timeout: float = 30) -> dict:
@@ -367,8 +389,10 @@ def main():
     print("PRECOMPUTE: Frames + VAE Latents")
     print("=" * 70)
     print(f"Output: {output_dir}")
-    print(f"Target: {'unlimited' if CONFIG['target_videos'] == 0 else CONFIG['target_videos']} videos")
-    print(f"Max time: {'unlimited' if CONFIG['max_hours'] == 0 else f'{CONFIG[\"max_hours\"]}h'}")
+    target_str = 'unlimited' if CONFIG['target_videos'] == 0 else str(CONFIG['target_videos'])
+    time_str = 'unlimited' if CONFIG['max_hours'] == 0 else f"{CONFIG['max_hours']}h"
+    print(f"Target: {target_str} videos")
+    print(f"Max time: {time_str}")
     print("=" * 70)
 
     # Check disk space
