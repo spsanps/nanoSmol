@@ -53,13 +53,13 @@ CONFIG = {
     # Video settings
     "num_frames": 24,
     "frame_size": 256,
-    "min_duration": 20,  # seconds
+    "min_duration": 10,  # seconds (relaxed from 20 for higher acceptance)
     "max_duration": 60,  # seconds
 
-    # Performance
-    "prefetch_threads": 1,  # Single thread to avoid iterator race conditions
-    "prefetch_queue_size": 8,
-    "download_timeout": 30,
+    # Performance - aggressive parallel downloads
+    "prefetch_threads": 12,  # More parallel downloads
+    "prefetch_queue_size": 32,  # Large queue to keep GPU saturated
+    "download_timeout": 10,  # Quick timeout, skip slow URLs
 
     # Limits (0 = unlimited)
     "target_videos": 0,  # Run until stopped
@@ -258,41 +258,29 @@ class VideoPrefetcher:
             self.threads.append(t)
 
     def _worker(self):
-        samples_seen = 0
         while not self.stop_flag:
             try:
                 with self.iter_lock:
                     sample = next(self.dataset_iter)
-                samples_seen += 1
             except StopIteration:
-                print(f"[Prefetcher] Dataset exhausted after {samples_seen} samples", flush=True)
                 break
 
             # Filter by duration
             duration = parse_duration(sample.get('duration', 'PT0S'))
             if duration < self.config["min_duration"] or duration > self.config["max_duration"]:
-                if samples_seen <= 5 or samples_seen % 100 == 0:
-                    print(f"[Prefetcher] Skip (duration {duration}s not in [{self.config['min_duration']}-{self.config['max_duration']}])", flush=True)
                 continue
 
             url = sample.get('contentUrl', '')
             if not url:
-                print(f"[Prefetcher] Skip (no URL)", flush=True)
                 continue
 
             try:
-                if samples_seen <= 5:
-                    print(f"[Prefetcher] Downloading video {samples_seen}... (dur={duration}s)", flush=True)
                 video_bytes = download_video(url, self.config["download_timeout"])
-                if samples_seen <= 5:
-                    print(f"[Prefetcher] Downloaded {len(video_bytes)} bytes, extracting frames...", flush=True)
                 frames = extract_frames_fast(
                     video_bytes,
                     self.config["num_frames"],
                     self.config["frame_size"]
                 )
-                if samples_seen <= 5:
-                    print(f"[Prefetcher] Extracted {frames.shape}, adding to queue...", flush=True)
 
                 self.queue.put({
                     'video_id': sample.get('videoid', ''),
@@ -300,14 +288,9 @@ class VideoPrefetcher:
                     'duration': duration,
                     'frames': frames,
                 }, timeout=60)
-                if samples_seen <= 5:
-                    print(f"[Prefetcher] Video {samples_seen} queued!", flush=True)
 
-            except Exception as e:
-                # Log and skip failed videos
-                import traceback
-                print(f"[Prefetcher] Failed video {samples_seen}: {e}", flush=True)
-                traceback.print_exc()
+            except Exception:
+                # Skip failed videos silently
                 continue
 
     def get(self, timeout: float = 30) -> dict:
