@@ -325,21 +325,13 @@ def save_metadata(metadata: dict, output_dir: Path):
         json.dump(metadata, f, indent=2)
 
 
-def get_existing_ids(output_dir: Path) -> set:
-    """Get set of already processed video IDs."""
+def get_existing_count(output_dir: Path) -> int:
+    """Fast count of existing files (no loading)."""
     features_dir = output_dir / "features"
     if not features_dir.exists():
-        return set()
-
-    existing = set()
-    for f in features_dir.glob("*.pt"):
-        try:
-            data = torch.load(f, map_location="cpu", weights_only=True)
-            if 'video_id' in data:
-                existing.add(data['video_id'])
-        except:
-            pass
-    return existing
+        return 0
+    # Just count files - much faster than loading each one
+    return len(list(features_dir.glob("*.pt")))
 
 
 def format_eta(seconds: float) -> str:
@@ -389,8 +381,7 @@ def main():
 
     # Load existing metadata
     metadata = load_metadata(output_dir)
-    existing_ids = get_existing_ids(output_dir)
-    start_count = len(existing_ids)
+    start_count = get_existing_count(output_dir)
     print(f"Resuming from {start_count} existing videos")
 
     # Initialize VAE
@@ -450,10 +441,6 @@ def main():
 
             video_id = sample['video_id']
 
-            # Skip if already processed
-            if video_id in existing_ids:
-                continue
-
             try:
                 # Encode frames to latents
                 frames = sample['frames']  # [T, 3, H, W] uint8
@@ -470,7 +457,6 @@ def main():
                 }, save_path)
 
                 # Update tracking
-                existing_ids.add(video_id)
                 success_count += 1
 
                 metadata['samples'].append({
