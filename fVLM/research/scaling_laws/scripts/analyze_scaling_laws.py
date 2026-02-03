@@ -43,9 +43,11 @@ MARKERS = {
 
 def load_data():
     """Load scaling data from CSV."""
-    csv_path = DATA_DIR / "scaling_data.csv"
-    if csv_path.exists():
-        return pd.read_csv(csv_path)
+    # Try different file names
+    for name in ["scaling_data_S-S.csv", "scaling_data.csv"]:
+        csv_path = DATA_DIR / name
+        if csv_path.exists():
+            return pd.read_csv(csv_path)
 
     # Fallback to JSON
     json_path = DATA_DIR / "scaling_data.json"

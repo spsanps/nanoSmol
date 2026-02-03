@@ -128,6 +128,7 @@ def collate_fn(batch):
 def train_model(model, model_type, tokenizer, dataloader, config, device, max_steps, checkpoint_steps, exp_name):
     """Train model and save checkpoints."""
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
+    scaler = torch.amp.GradScaler('cuda')  # Mixed precision
 
     exp_dir = OUTPUT_BASE / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -148,30 +149,30 @@ def train_model(model, model_type, tokenizer, dataloader, config, device, max_st
             batch = next(data_iter)
 
         frames = batch['frames'].to(device)
-        latents = batch['latents'].to(device)
         captions = batch['captions']
 
         tokens = tokenizer(captions, padding=True, truncation=True, max_length=64, return_tensors='pt').to(device)
         caption_ids = tokens['input_ids']
         caption_mask = tokens['attention_mask']
 
-        if model_type == "foveated":
-            # Use forward_captioning which takes caption_ids directly
-            # use_fine=True for fine iterations > 0
-            use_fine = config['fine_iterations'] > 0
-            loss = model.forward_captioning(frames, caption_ids, caption_mask, use_fine=use_fine)
-        else:
-            # BaselineVLM.forward needs caption_embeds and caption_targets
-            caption_embeds = model.llm.model.embed_tokens(caption_ids)
-            caption_targets = caption_ids[:, 1:].clone()
-            # Mask padding tokens in targets
-            caption_targets[caption_targets == tokenizer.pad_token_id] = -100
-            loss, _ = model.forward(frames, caption_embeds, caption_targets)
-
         optimizer.zero_grad()
-        loss.backward()
+
+        # Mixed precision training
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            if model_type == "foveated":
+                use_fine = config['fine_iterations'] > 0
+                loss = model.forward_captioning(frames, caption_ids, caption_mask, use_fine=use_fine)
+            else:
+                caption_embeds = model.llm.model.embed_tokens(caption_ids)
+                caption_targets = caption_ids[:, 1:].clone()
+                caption_targets[caption_targets == tokenizer.pad_token_id] = -100
+                loss, _ = model.forward(frames, caption_embeds, caption_targets)
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         step += 1
 
@@ -306,6 +307,14 @@ def evaluate_checkpoint(model, model_type, tokenizer, samples, fine_iterations, 
 # Main
 # ============================================================================
 
+def clear_gpu():
+    """Aggressively clear GPU memory."""
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+
 def main():
     print("=" * 80)
     print("SCALING LAW STUDY")
@@ -314,6 +323,11 @@ def main():
 
     device = torch.device("cuda")
     OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+
+    # Check GPU memory at start
+    clear_gpu()
+    mem_used = torch.cuda.memory_allocated() / 1e9
+    print(f"GPU memory at start: {mem_used:.2f} GB")
 
     # Load data split
     with open(SPLIT_FILE) as f:
@@ -360,8 +374,10 @@ def main():
         config = {**COMMON, **cfg}
         train_model(model, cfg['model_type'], tokenizer, dataloader, config, device, max_steps, set(STEP_COUNTS), exp_name)
 
-        del model
-        torch.cuda.empty_cache()
+        # Aggressive cleanup between experiments
+        del model, dataloader, dataset
+        clear_gpu()
+        print(f"GPU memory after {exp_name}: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 
     # ========== EVALUATION PHASE ==========
     print(f"\n{'='*60}")
@@ -430,8 +446,9 @@ def main():
                 'visual_tokens_per_frame': cfg['visual_tokens_per_frame'],
             })
 
-        del model
-        torch.cuda.empty_cache()
+        del model, samples
+        clear_gpu()
+        print(f"GPU memory after eval {exp_name}: {torch.cuda.memory_allocated()/1e9:.2f} GB")
 
     # ========== SAVE RESULTS ==========
     data_dir = RESEARCH_DIR / "data"
