@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Single-epoch foveated VLM training on train split only.
+Optimized foveated VLM training for fair FLOPs comparison.
 
-Uses the same architecture and forward pass as train_joint_multifine_precomputed.py
-but with data split enforcement and single-epoch stopping.
+Changes from original:
+- fine_iterations=1 (instead of 2) - fewer LLM passes
+- 224x224 frames (instead of 256x256) - same as baseline
 
-Output: /mnt/d/projects/fVLM/outputs/foveated_singleepoch/
+Output: /mnt/d/projects/fVLM/outputs/foveated_optimized/
 """
 
 import sys
@@ -57,14 +58,16 @@ CONFIG = {
 
     "lambda_recon": 0.5,
     "lambda_coarse": 0.0,
-    "fine_iterations": 2,
+    "fine_iterations": 1,  # Changed: 1 instead of 2
 
     "deep_query": True,
     "freeze_dino": False,
 
+    "frame_size": 224,  # Changed: same as baseline
+
     "log_interval": 50,
     "save_interval": 2000,
-    "output_dir": "/mnt/d/projects/fVLM/outputs/foveated_singleepoch",
+    "output_dir": "/mnt/d/projects/fVLM/outputs/foveated_optimized",
     "max_checkpoints": 3,
 }
 
@@ -77,9 +80,10 @@ class ShardedVideoDataset(torch.utils.data.IterableDataset):
     """Sharded dataset that respects train/val split."""
 
     def __init__(self, shard_dir: str, num_frames: int = 8,
-                 shard_whitelist: list = None):
+                 shard_whitelist: list = None, frame_size: int = 256):
         self.shard_dir = Path(shard_dir)
         self.num_frames = num_frames
+        self.frame_size = frame_size
 
         all_shards = sorted(self.shard_dir.glob("shard_*.pt"))
         if shard_whitelist is not None:
@@ -136,6 +140,13 @@ class ShardedVideoDataset(torch.utils.data.IterableDataset):
 
         frames = frames.float() / 255.0
         frames = (frames - IMAGENET_MEAN) / IMAGENET_STD
+
+        # Resize to 224x224 (same as baseline) - frames are [T, 3, 256, 256]
+        if self.frame_size != 256:
+            frames = F.interpolate(
+                frames, size=(self.frame_size, self.frame_size),
+                mode='bilinear', align_corners=False
+            )
 
         return {
             'frames': frames,
@@ -438,6 +449,7 @@ def run_training():
         shard_dir=CONFIG["shard_dir"],
         num_frames=CONFIG["num_frames"],
         shard_whitelist=train_shards,
+        frame_size=CONFIG.get("frame_size", 256),
     )
     dataloader = DataLoader(
         dataset,

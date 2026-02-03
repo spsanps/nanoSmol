@@ -59,7 +59,7 @@ CONFIG = {
     "data_dir": "/mnt/d/projects/fVLM/data/frames_latents_100k/features",
     "num_frames": 8,  # Subsample from 24 precomputed frames (8 = sweet spot)
 
-    # Training (BS=16 = sweet spot: 17.2GB VRAM, 1.07s/step, no grad accum)
+    # Training (BS=16: 17.6GB VRAM, 1.1s/step - stable on 16GB RAM system)
     "batch_size": 16,
     "grad_accum": 1,   # No accumulation - full batch fits in VRAM
     "learning_rate": 3e-5,
@@ -96,9 +96,9 @@ CONFIG = {
 # ============================================================================
 
 class PrecomputedVideoDataset(Dataset):
-    """Loads precomputed frames + VAE latents from disk."""
+    """Loads precomputed frames + VAE latents from disk (individual files)."""
 
-    def __init__(self, data_dir: str, num_frames: int = 16):
+    def __init__(self, data_dir: str, num_frames: int = 8):
         self.data_dir = Path(data_dir)
         self.num_frames = num_frames
 
@@ -111,7 +111,9 @@ class PrecomputedVideoDataset(Dataset):
 
     def __getitem__(self, idx):
         data = torch.load(self.files[idx], map_location="cpu", weights_only=True)
+        return self._process(data)
 
+    def _process(self, data):
         frames = data['frames']   # [24, 3, 256, 256] uint8
         latents = data['latents'] # [24, 4, 32, 32] bfloat16
         caption = data['caption']
@@ -131,6 +133,73 @@ class PrecomputedVideoDataset(Dataset):
         return {
             'frames': frames,           # [T, 3, 256, 256] float32
             'latents': latents.float(),  # [T, 4, 32, 32] float32
+            'caption': caption,
+        }
+
+
+class ShardedVideoDataset(torch.utils.data.IterableDataset):
+    """Loads shards sequentially, shuffles within each shard.
+    Supports multi-worker: each worker handles a disjoint subset of shards."""
+
+    def __init__(self, shard_dir: str, num_frames: int = 8):
+        self.shard_dir = Path(shard_dir)
+        self.num_frames = num_frames
+        self.shard_files = sorted(self.shard_dir.glob("shard_*.pt"))
+        self.num_shards = len(self.shard_files)
+        self.samples_per_shard = 200  # approximate
+        print(f"Found {self.num_shards} shards")
+        print(f"Total samples (approx): {self.num_shards * self.samples_per_shard}")
+
+    def __iter__(self):
+        # Partition shards across workers
+        worker_info = torch.utils.data.get_worker_info()
+        shard_indices = list(range(self.num_shards))
+        random.shuffle(shard_indices)
+
+        if worker_info is not None:
+            # Split shards among workers
+            per_worker = len(shard_indices) // worker_info.num_workers
+            start = worker_info.id * per_worker
+            end = start + per_worker if worker_info.id < worker_info.num_workers - 1 else len(shard_indices)
+            shard_indices = shard_indices[start:end]
+
+        for shard_idx in shard_indices:
+            try:
+                shard = torch.load(
+                    self.shard_files[shard_idx],
+                    map_location="cpu", weights_only=False
+                )
+                samples = shard['samples']
+                del shard
+            except Exception:
+                continue  # Skip corrupt shards
+
+            # Shuffle within shard
+            indices = list(range(len(samples)))
+            random.shuffle(indices)
+
+            for i in indices:
+                yield self._process(samples[i])
+
+            del samples
+
+    def _process(self, data):
+        frames = data['frames']
+        latents = data['latents']
+        caption = data['caption']
+
+        T_orig = frames.shape[0]
+        if T_orig > self.num_frames:
+            indices = np.linspace(0, T_orig - 1, self.num_frames, dtype=int)
+            frames = frames[indices]
+            latents = latents[indices]
+
+        frames = frames.float() / 255.0
+        frames = (frames - IMAGENET_MEAN) / IMAGENET_STD
+
+        return {
+            'frames': frames,
+            'latents': latents.float(),
             'caption': caption,
         }
 
@@ -368,7 +437,10 @@ def run_training():
     num_fine_iters = CONFIG["fine_iterations"]
 
     # Disk space check
-    data_disk = shutil.disk_usage(CONFIG["data_dir"])
+    data_path = Path(CONFIG["data_dir"])
+    while not data_path.exists() and data_path != data_path.parent:
+        data_path = data_path.parent
+    data_disk = shutil.disk_usage(str(data_path))
     out_disk = shutil.disk_usage(str(output_dir))
     print(f"Data disk: {data_disk.free / 1e9:.0f} GB free")
     print(f"Output disk: {out_disk.free / 1e9:.0f} GB free")
@@ -441,24 +513,38 @@ def run_training():
 
     # ---- Dataset ----
     print("[3/4] Loading dataset...")
-    dataset = PrecomputedVideoDataset(
-        data_dir=CONFIG["data_dir"],
-        num_frames=CONFIG["num_frames"],
-    )
+    shard_dir = Path(CONFIG["data_dir"]).parent.parent / "frames_latents_sharded"
+    if shard_dir.exists() and list(shard_dir.glob("shard_*.pt")):
+        print(f"  Using SHARDED dataset from {shard_dir}")
+        dataset = ShardedVideoDataset(
+            shard_dir=str(shard_dir),
+            num_frames=CONFIG["num_frames"],
+        )
+    else:
+        print(f"  Using individual files from {CONFIG['data_dir']}")
+        dataset = PrecomputedVideoDataset(
+            data_dir=CONFIG["data_dir"],
+            num_frames=CONFIG["num_frames"],
+        )
+    is_iterable = isinstance(dataset, torch.utils.data.IterableDataset)
     dataloader = DataLoader(
         dataset,
         batch_size=CONFIG["batch_size"],
-        shuffle=True,
-        num_workers=8,
+        shuffle=not is_iterable,
+        num_workers=2,
         pin_memory=True,
         drop_last=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=2,
         collate_fn=CollateFn(),
     )
 
-    print(f"  Dataset: {len(dataset)} videos")
-    print(f"  Batches/epoch: {len(dataset) // CONFIG['batch_size']}")
+    if hasattr(dataset, '__len__'):
+        print(f"  Dataset: {len(dataset)} videos")
+        print(f"  Batches/epoch: {len(dataset) // CONFIG['batch_size']}")
+    else:
+        approx = dataset.num_shards * dataset.samples_per_shard
+        print(f"  Dataset: ~{approx} videos (sharded)")
+        print(f"  Batches/epoch: ~{approx // CONFIG['batch_size']}")
 
     # ---- Training ----
     print("[4/4] Starting training...")
@@ -467,6 +553,7 @@ def run_training():
     step = start_step
     epoch = start_epoch
     accum_count = 0
+    accum_coarse_count = 0
     accum_cap_coarse = 0.0
     accum_cap_iters = [0.0] * num_fine_iters
     accum_rec_coarse = 0.0
@@ -495,18 +582,21 @@ def run_training():
                 if step >= CONFIG["max_steps"]:
                     break
 
-                # Move to GPU
-                frames = batch['frames'].to(device)
-                latents = batch['latents'].to(device)
-                caption_ids = batch['caption_ids'].to(device)
-                caption_mask = batch['caption_mask'].to(device)
+                # Move to GPU (non_blocking with pin_memory for overlap)
+                frames = batch['frames'].to(device, non_blocking=True)
+                latents = batch['latents'].to(device, non_blocking=True)
+                caption_ids = batch['caption_ids'].to(device, non_blocking=True)
+                caption_mask = batch['caption_mask'].to(device, non_blocking=True)
 
                 with autocast(device_type='cuda', dtype=torch.bfloat16):
+                    # Compute coarse loss every 10 steps for ratio tracking
+                    # saves 2 LLM passes (25%) on other steps
+                    do_coarse = (step % 10 == 0) or (step < start_step + 50)
                     cap_coarse, cap_iter_losses, rec_coarse, rec_iter_losses = \
                         forward_multifine_joint(
                             model, frames, caption_ids, caption_mask,
                             latents, tokenizer, num_fine_iters,
-                            compute_coarse_loss=True
+                            compute_coarse_loss=do_coarse
                         )
 
                     # Loss on final fine iteration
@@ -523,12 +613,14 @@ def run_training():
                 scaler.scale(loss).backward()
 
                 # Accumulate metrics
-                accum_cap_coarse += cap_coarse.item()
                 for i, l in enumerate(cap_iter_losses):
                     accum_cap_iters[i] += l.item()
-                accum_rec_coarse += rec_coarse.item()
                 for i, l in enumerate(rec_iter_losses):
                     accum_rec_iters[i] += l.item()
+                if do_coarse:
+                    accum_cap_coarse += cap_coarse.item()
+                    accum_rec_coarse += rec_coarse.item()
+                    accum_coarse_count += 1
                 accum_count += 1
 
                 if accum_count >= CONFIG["grad_accum"]:
@@ -544,15 +636,17 @@ def run_training():
                     optimizer.zero_grad()
 
                     # Compute averages
-                    avg_cap_coarse = accum_cap_coarse / accum_count
                     avg_cap_iters = [x / accum_count for x in accum_cap_iters]
-                    avg_rec_coarse = accum_rec_coarse / accum_count
                     avg_rec_iters = [x / accum_count for x in accum_rec_iters]
 
-                    cap_ratio = avg_cap_coarse / (avg_cap_iters[-1] + 1e-8)
-                    rec_ratio = avg_rec_coarse / (avg_rec_iters[-1] + 1e-8)
-                    cap_ratios.append(cap_ratio)
-                    rec_ratios.append(rec_ratio)
+                    # Ratio: only update when coarse was computed
+                    if accum_coarse_count > 0:
+                        avg_cap_coarse = accum_cap_coarse / accum_coarse_count
+                        avg_rec_coarse = accum_rec_coarse / accum_coarse_count
+                        cap_ratio = avg_cap_coarse / (avg_cap_iters[-1] + 1e-8)
+                        rec_ratio = avg_rec_coarse / (avg_rec_iters[-1] + 1e-8)
+                        cap_ratios.append(cap_ratio)
+                        rec_ratios.append(rec_ratio)
 
                     now = time.time()
                     step_times.append(now - last_step_time)
@@ -590,6 +684,10 @@ def run_training():
                             f"ETA: {eta.strftime('%H:%M')}"
                         )
                         tqdm.write(log_msg)
+                        # Also write to dedicated log file (tqdm \r corrupts nohup logs)
+                        with open(output_dir / 'train.log', 'a') as lf:
+                            lf.write(log_msg + '\n')
+                            lf.flush()
 
                         if HAS_WANDB:
                             log_dict = {
@@ -633,6 +731,7 @@ def run_training():
                     accum_rec_coarse = 0.0
                     accum_rec_iters = [0.0] * num_fine_iters
                     accum_count = 0
+                    accum_coarse_count = 0
 
     except (KeyboardInterrupt, StopIteration):
         print("\n[STOPPED]")

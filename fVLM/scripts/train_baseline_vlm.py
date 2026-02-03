@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Single-epoch SmolVLM2 caption fine-tuning on train split.
+Baseline VLM training: DINOv2 + PixelShuffle + SmolLM2
 
-Fine-tunes SmolVLM2-256M-Video-Instruct on the same training data as the
-foveated model for fair comparison. Caption-only loss (no reconstruction).
+Uses 16 tokens per frame (vs foveated's 1 token) for fair comparison.
+Same training recipe as foveated: end-to-end, everything trainable.
 
-Output: /mnt/d/projects/fVLM/outputs/smolvlm_singleepoch/
+Output: /mnt/d/projects/fVLM/outputs/baseline_vlm/
 """
 
+import os
 import sys
 import time
-import json
 import random
+import json
 import torch
 import torch.nn.functional as F
 from torch.amp import autocast
@@ -19,18 +20,17 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime, timedelta
-from PIL import Image
+from transformers import AutoTokenizer
 import numpy as np
 from collections import deque
 
-try:
-    import wandb
-    HAS_WANDB = True
-except ImportError:
-    HAS_WANDB = False
-    wandb = None
-
 PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from src.model.baseline_vlm import BaselineVLM
+
+# ImageNet normalization (same as foveated)
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 # ============================================================================
 # CONFIGURATION
@@ -40,19 +40,22 @@ CONFIG = {
     "shard_dir": "/mnt/d/projects/fVLM/data/frames_latents_sharded",
     "split_file": str(PROJECT_ROOT / "configs" / "data_split.json"),
     "num_frames": 8,
+    "frame_size": 224,  # Resize to 224x224 for clean 16x16 patch grid
 
-    "model_name": "HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
-
-    "batch_size": 2,
-    "grad_accum": 8,     # effective batch = 16 (same as foveated)
-    "learning_rate": 2e-5,
+    "batch_size": 16,  # Same as foveated
+    "grad_accum": 1,   # No accumulation needed, fits in ~11 GB
+    "learning_rate": 3e-5,
     "weight_decay": 0.01,
     "warmup_steps": 200,
     "grad_clip": 1.0,
 
+    "pixel_shuffle_scale": 4,  # 16x16 -> 4x4 = 16 tokens/frame
+    "freeze_dino": False,
+    "freeze_llm": False,
+
     "log_interval": 50,
     "save_interval": 2000,
-    "output_dir": "/mnt/d/projects/fVLM/outputs/smolvlm_singleepoch",
+    "output_dir": "/mnt/d/projects/fVLM/outputs/baseline_vlm",
     "max_checkpoints": 3,
 }
 
@@ -61,17 +64,14 @@ CONFIG = {
 # DATASET
 # ============================================================================
 
-class ShardedCaptionDataset(torch.utils.data.IterableDataset):
-    """Sharded dataset that yields raw frames + captions for SmolVLM.
+class ShardedVideoDataset(torch.utils.data.IterableDataset):
+    """Sharded dataset with frame resizing for baseline model."""
 
-    Unlike the foveated dataset, this returns raw uint8 frames
-    (SmolVLM's processor handles normalization).
-    """
-
-    def __init__(self, shard_dir: str, num_frames: int = 8,
+    def __init__(self, shard_dir: str, num_frames: int = 8, frame_size: int = 224,
                  shard_whitelist: list = None):
         self.shard_dir = Path(shard_dir)
         self.num_frames = num_frames
+        self.frame_size = frame_size
 
         all_shards = sorted(self.shard_dir.glob("shard_*.pt"))
         if shard_whitelist is not None:
@@ -124,25 +124,48 @@ class ShardedCaptionDataset(torch.utils.data.IterableDataset):
             indices = np.linspace(0, T_orig - 1, self.num_frames, dtype=int)
             frames = frames[indices]
 
-        # Convert to list of PIL images for SmolVLM processor
-        pil_frames = []
-        for t in range(frames.shape[0]):
-            # [3, 256, 256] uint8 -> PIL Image
-            frame_np = frames[t].permute(1, 2, 0).numpy()  # [256, 256, 3]
-            pil_frames.append(Image.fromarray(frame_np))
+        # Resize to 224x224 for clean DINOv2 patch grid
+        # frames: [T, 3, 256, 256] -> [T, 3, 224, 224]
+        frames_float = frames.float()
+        frames_resized = F.interpolate(
+            frames_float,
+            size=(self.frame_size, self.frame_size),
+            mode='bilinear',
+            align_corners=False
+        )
+
+        # Normalize with ImageNet stats
+        frames_norm = frames_resized / 255.0
+        frames_norm = (frames_norm - IMAGENET_MEAN) / IMAGENET_STD
 
         return {
-            'pil_frames': pil_frames,
+            'frames': frames_norm,  # [T, 3, 224, 224] normalized
             'caption': caption,
         }
 
 
-def collate_fn(batch):
-    """Simple collation - processor handles tokenization per batch."""
-    return {
-        'pil_frames': [b['pil_frames'] for b in batch],
-        'captions': [b['caption'] for b in batch],
-    }
+class CollateFn:
+    def __init__(self, tokenizer, max_caption_len=64):
+        self.tokenizer = tokenizer
+        self.max_caption_len = max_caption_len
+
+    def __call__(self, batch):
+        frames = torch.stack([b['frames'] for b in batch])  # [B, T, 3, 224, 224]
+        captions = [b['caption'] for b in batch]
+
+        tokens = self.tokenizer(
+            captions,
+            padding=True,
+            truncation=True,
+            max_length=self.max_caption_len,
+            return_tensors='pt'
+        )
+
+        return {
+            'frames': frames,
+            'caption_ids': tokens['input_ids'],
+            'caption_mask': tokens['attention_mask'],
+        }
 
 
 # ============================================================================
@@ -166,7 +189,7 @@ def save_checkpoint(model, optimizer, scheduler, step, epoch, metrics,
     }
 
     torch.save(checkpoint, save_dir / 'latest.pt')
-    if step % 2000 == 0:
+    if step % 2000 == 0 and step > 0:
         torch.save(checkpoint, save_dir / f'step_{step:06d}.pt')
 
     all_ckpts = sorted(save_dir.glob('step_*.pt'), key=lambda p: p.stat().st_mtime)
@@ -197,103 +220,6 @@ def load_checkpoint(model, optimizer, scheduler, save_dir, device):
 
 
 # ============================================================================
-# BATCH PROCESSING
-# ============================================================================
-
-def prepare_caption_batch(processor, pil_frames_batch, captions, device):
-    """Prepare a batch for caption training with proper label masking.
-
-    Returns input_ids, attention_mask, pixel_values, and labels where
-    only caption tokens (assistant response) contribute to loss.
-    """
-    B = len(captions)
-
-    # Build chat messages for each sample
-    all_input_ids = []
-    all_attention_masks = []
-    all_pixel_values = []
-    all_labels = []
-
-    for i in range(B):
-        frames = pil_frames_batch[i]  # list of PIL images
-
-        # Build chat template: user asks, assistant provides caption
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this video:"},
-                ] + [{"type": "image"} for _ in frames],
-            },
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": captions[i]},
-                ],
-            },
-        ]
-
-        # Process with the SmolVLM processor
-        text = processor.apply_chat_template(messages, add_generation_prompt=False)
-        inputs = processor(
-            text=text,
-            images=frames,
-            return_tensors="pt",
-        )
-
-        input_ids = inputs["input_ids"].squeeze(0)
-        attention_mask = inputs["attention_mask"].squeeze(0)
-
-        # Create labels: mask everything except the assistant's caption tokens
-        # Find where the assistant response starts
-        labels = input_ids.clone()
-
-        # Tokenize just the caption to find its token IDs
-        caption_tokens = processor.tokenizer(
-            captions[i], add_special_tokens=False, return_tensors="pt"
-        )["input_ids"].squeeze(0)
-
-        # Mask all tokens before the caption with -100
-        # The caption tokens appear at the end of the sequence
-        caption_len = len(caption_tokens)
-        if caption_len < len(labels):
-            labels[:-caption_len] = -100
-
-        all_input_ids.append(input_ids)
-        all_attention_masks.append(attention_mask)
-        all_labels.append(labels)
-
-        if "pixel_values" in inputs:
-            all_pixel_values.append(inputs["pixel_values"].squeeze(0))
-
-    # Pad to max length in batch
-    max_len = max(ids.shape[0] for ids in all_input_ids)
-    pad_id = processor.tokenizer.pad_token_id or 0
-
-    padded_input_ids = torch.full((B, max_len), pad_id, dtype=torch.long)
-    padded_attention = torch.zeros(B, max_len, dtype=torch.long)
-    padded_labels = torch.full((B, max_len), -100, dtype=torch.long)
-
-    for i in range(B):
-        seq_len = all_input_ids[i].shape[0]
-        padded_input_ids[i, :seq_len] = all_input_ids[i]
-        padded_attention[i, :seq_len] = all_attention_masks[i]
-        padded_labels[i, :seq_len] = all_labels[i]
-
-    result = {
-        "input_ids": padded_input_ids.to(device),
-        "attention_mask": padded_attention.to(device),
-        "labels": padded_labels.to(device),
-    }
-
-    if all_pixel_values:
-        # Stack pixel values - they should all have the same shape
-        result["pixel_values"] = torch.stack(all_pixel_values).to(device, dtype=torch.bfloat16)
-
-    return result
-
-
-# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -314,8 +240,7 @@ def run_training():
     effective_bs = CONFIG["batch_size"] * CONFIG["grad_accum"]
     max_steps = approx_samples // effective_bs
 
-    # Allow env var overrides for partial-epoch runs
-    import os
+    # Allow env var overrides
     if os.environ.get("MAX_STEPS"):
         max_steps = int(os.environ["MAX_STEPS"])
     if os.environ.get("OUTPUT_DIR"):
@@ -327,46 +252,38 @@ def run_training():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 80)
-    print("SmolVLM2 - SINGLE EPOCH CAPTION FINE-TUNING (with data split)")
+    print("BASELINE VLM - DINOv2 + PixelShuffle + SmolLM2")
     print("=" * 80)
-    print(f"Model: {CONFIG['model_name']}")
     print(f"Train shards: {len(train_shards)} (~{approx_samples} samples)")
     print(f"Val shards: {split['val_count']} (EXCLUDED)")
     print(f"Batch: {CONFIG['batch_size']} x {CONFIG['grad_accum']} = {effective_bs}")
-    print(f"Max steps: {max_steps} (single epoch)")
+    print(f"Max steps: {max_steps}")
+    print(f"Tokens per frame: 16 (vs foveated's 1)")
+    print(f"Frame size: {CONFIG['frame_size']}x{CONFIG['frame_size']}")
     print(f"Output: {output_dir}")
     print("=" * 80)
 
     with open(output_dir / 'config.json', 'w') as f:
         json.dump({**CONFIG, 'max_steps': max_steps, 'train_shards_count': len(train_shards)}, f, indent=2)
 
-    # Load model
-    print("\n[1/4] Loading SmolVLM2...")
-    from transformers import AutoModelForImageTextToText, AutoProcessor
-
-    model = AutoModelForImageTextToText.from_pretrained(
-        CONFIG["model_name"],
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
+    # Model
+    print("\n[1/4] Loading model...")
+    model = BaselineVLM(
+        dino_model="facebook/dinov2-small",
+        llm_model="HuggingFaceTB/SmolLM2-135M-Instruct",
+        pixel_shuffle_scale=CONFIG["pixel_shuffle_scale"],
+        freeze_dino=CONFIG["freeze_dino"],
+        freeze_llm=CONFIG["freeze_llm"],
     ).to(device)
-
-    processor = AutoProcessor.from_pretrained(
-        CONFIG["model_name"],
-        trust_remote_code=True,
-    )
-    # Disable image splitting: our 256x256 frames don't benefit from tiling,
-    # and 8 frames with splitting exceeds the 8192 token limit
-    processor.image_processor.do_image_splitting = False
-
-    # Enable gradient checkpointing
-    if hasattr(model.model, 'text_model'):
-        model.model.text_model.gradient_checkpointing_enable()
-
-    model.train()
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Total: {total_params/1e6:.1f}M, Trainable: {trainable_params/1e6:.1f}M")
+
+    # Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -388,22 +305,23 @@ def run_training():
 
     # Dataset
     print("[3/4] Loading dataset...")
-    dataset = ShardedCaptionDataset(
+    dataset = ShardedVideoDataset(
         shard_dir=CONFIG["shard_dir"],
         num_frames=CONFIG["num_frames"],
+        frame_size=CONFIG["frame_size"],
         shard_whitelist=train_shards,
     )
     dataloader = DataLoader(
         dataset,
         batch_size=CONFIG["batch_size"],
         num_workers=2,
-        pin_memory=False,  # PIL images can't be pinned
+        pin_memory=True,
         drop_last=True,
-        collate_fn=collate_fn,
+        collate_fn=CollateFn(tokenizer),
     )
 
     # Training
-    print(f"[4/4] Starting training (max {max_steps} optimizer steps)...")
+    print(f"[4/4] Starting training (max {max_steps} steps)...")
     print(f"{'='*80}\n")
 
     step = start_step
@@ -413,6 +331,7 @@ def run_training():
     losses = deque(maxlen=100)
     step_times = deque(maxlen=50)
 
+    model.train()
     pbar = tqdm(total=max_steps, initial=start_step, desc="Training")
     optimizer.zero_grad()
     last_step_time = time.time()
@@ -428,23 +347,20 @@ def run_training():
                 if step >= max_steps:
                     break
 
-                # Prepare batch with label masking
-                try:
-                    prepared = prepare_caption_batch(
-                        processor, batch['pil_frames'], batch['captions'], device
-                    )
-                except Exception as e:
-                    print(f"  Skipping batch: {e}")
-                    continue
+                frames = batch['frames'].to(device)  # [B, T, 3, 224, 224]
+                caption_ids = batch['caption_ids'].to(device)
+                caption_mask = batch['caption_mask'].to(device)
+
+                # Get caption embeddings
+                caption_embeds = model.llm.model.embed_tokens(caption_ids)
+
+                # Targets: shifted caption ids
+                caption_targets = caption_ids[:, 1:].clone()
+                caption_targets[caption_mask[:, 1:] == 0] = -100
 
                 with autocast(device_type='cuda', dtype=torch.bfloat16):
-                    outputs = model(
-                        input_ids=prepared["input_ids"],
-                        attention_mask=prepared["attention_mask"],
-                        pixel_values=prepared.get("pixel_values"),
-                        labels=prepared["labels"],
-                    )
-                    loss = outputs.loss / CONFIG["grad_accum"]
+                    loss, _ = model(frames, caption_embeds, caption_targets)
+                    loss = loss / CONFIG["grad_accum"]
 
                 loss.backward()
                 accum_loss += loss.item()
@@ -476,7 +392,7 @@ def run_training():
 
                         log_msg = (
                             f"[{datetime.now().strftime('%H:%M:%S')}] "
-                            f"Step {step:5d}/{max_steps} | "
+                            f"Step {step:5d}/{max_steps} ep{epoch} | "
                             f"loss: {avg_loss:.4f} ppl: {np.exp(avg_loss):.1f} | "
                             f"{avg_time:.1f}s/step | {mem_gb:.1f}GB | "
                             f"ETA: {eta.strftime('%H:%M')}"
@@ -513,8 +429,8 @@ def run_training():
                         max_keep=CONFIG["max_checkpoints"])
 
         summary = {
-            'experiment': 'smolvlm_singleepoch',
-            'model': CONFIG['model_name'],
+            'experiment': 'baseline_vlm',
+            'tokens_per_frame': 16,
             'elapsed_hours': elapsed,
             'total_steps': step,
             'epochs': epoch,

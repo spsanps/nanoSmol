@@ -87,7 +87,7 @@ class FoveatedVideoModel(nn.Module):
             self.encoder.dino.eval()
 
         # Core LLM
-        self.llm = AutoModelForCausalLM.from_pretrained(llm_model)
+        self.llm = AutoModelForCausalLM.from_pretrained(llm_model, attn_implementation='sdpa')
         self.llm.config.use_cache = False  # Disable KV cache during training
 
         # Projections with scaling to match LLM embedding scale (~0.14 std)
