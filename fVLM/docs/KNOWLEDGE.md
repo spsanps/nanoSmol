@@ -484,6 +484,44 @@ to overcome the projection layer and produce meaningful attention patterns.
 
 ---
 
+### ⚠️ CRITICAL: Training vs Inference Mismatch
+
+> **This is a fundamental architectural difference that affects loss measurement and evaluation.**
+
+**During TRAINING (current `forward_captioning` with `use_fine=True`):**
+```
+1. Coarse pass: q_static → ALL frames (parallel) → z_coarse
+2. z_coarse → LLM → generates ALL queries at once
+3. Fine pass: shifted queries → ALL frames (parallel) → z_fine
+4. z_fine → LLM → caption loss
+```
+
+**During TRUE INFERENCE (autoregressive, no coarse pass):**
+```
+1. Frame 0: q_init → DINO → z_0 → LLM → q_1
+2. Frame 1: q_1 → DINO → z_1 → LLM → q_2
+3. Frame 2: q_2 → DINO → z_2 → LLM → q_3
+... purely sequential, NO coarse features used
+```
+
+**Key Difference:**
+- **Training:** Queries are derived from **COARSE features** (parallel approximation for efficiency)
+- **Inference:** Queries are derived from **PREVIOUS FINE features** (truly autoregressive)
+
+**Why This Matters:**
+1. The caption loss we measure uses the training-time approximation, NOT true inference behavior
+2. At inference, queries come from fine features (z_{t-1}), not coarse features (z°)
+3. Multi-fine training (coarse→fine₁→fine₂) partially bridges this gap by training query generation from fine features
+
+**Implications for Evaluation:**
+- Current evaluation with `use_fine=True` measures the **training-time approximation**
+- True inference-time performance may differ because query sources are different
+- Multi-fine iterations help because they train the model to generate queries from fine features
+
+**See Also:** Multi-Fine Iteration Experiment (2026-01-14) which addresses this train-test gap.
+
+---
+
 ### Proposal vs Implementation Discrepancies
 
 | Aspect | Proposal | Implementation | Status |

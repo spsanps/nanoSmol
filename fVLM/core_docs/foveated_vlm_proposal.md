@@ -670,13 +670,27 @@ Per frame:
 
 The KV caching in the encoder is critical: encoding patches is expensive (full transformer forward), but querying with a cached KV is cheap (just the query token propagates).
 
-### 8.3 Train/Inference Consistency
+### 8.3 Train/Inference Mismatch (IMPORTANT)
 
-Training with causal mask is mathematically equivalent to inference with KV cache:
-- `q_t` only depends on `z°_1, ..., z°_t` in both cases
-- `pred_t` only depends on `z_1, ..., z_t` in both cases
+**⚠️ NOTE: There IS a train/inference mismatch in query generation.**
 
-**No train/inference mismatch.**
+**During Training (Two-Pass Parallel Approximation):**
+- Pass 1: `q_static` → ALL frames (parallel) → `z°` (coarse features)
+- `z°` → LLM → ALL queries at once (parallel)
+- Pass 2: shifted queries → ALL frames (parallel) → `z` (fine features)
+
+**During True Inference (Autoregressive, No Coarse Pass):**
+- Frame 1: `q_init` → `z_1` → LLM → `q_1`
+- Frame 2: `q_1` → `z_2` → LLM → `q_2`
+- ... purely sequential, NO coarse features
+
+**The Key Difference:**
+- **Training:** `q_t` depends on `z°_1, ..., z°_t` (COARSE features from static query)
+- **Inference:** `q_t` depends on `z_1, ..., z_{t-1}` (FINE features from previous dynamic queries)
+
+**Implications:**
+- Evaluation with `use_fine=True` measures training approximation, not true inference
+- Multi-fine iterations (coarse→fine₁→fine₂) partially bridge this gap by training query generation from fine features
 
 ### 8.4 Inference Modes
 
