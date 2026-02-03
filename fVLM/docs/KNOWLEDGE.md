@@ -520,6 +520,25 @@ to overcome the projection layer and produce meaningful attention patterns.
 
 **See Also:** Multi-Fine Iteration Experiment (2026-01-14) which addresses this train-test gap.
 
+### Gap Analysis Results (2026-02-03)
+
+**FINDING: The train/inference gap is negligible (<0.1%)**
+
+We implemented `forward_autoregressive_captioning()` to measure true inference loss (queries from fine features) and compared against training loss (queries from coarse features).
+
+| Model | Steps | Training Loss | Autoregressive Loss | Gap % |
+|-------|-------|---------------|---------------------|-------|
+| S-S (135M + small) | 100 | 4.048 | 4.024 | -0.60% |
+| S-S (135M + small) | 3000 | 3.504 | 3.504 | +0.01% |
+| M-S (360M + small) | 3000 | 3.498 | 3.498 | +0.01% |
+
+**Key Observations:**
+1. **Gap is negligible at convergence** (~0.01%) - training approximation is valid
+2. **Early training shows slight autoregressive advantage** (-0.6% at 100 steps)
+3. **Both small and medium LLM show identical gap** - gap doesn't scale with model size
+
+**Conclusion:** The parallel training approximation (coarse-derived queries) closely matches true autoregressive inference (fine-derived queries). No need for expensive true autoregressive training.
+
 ---
 
 ### Proposal vs Implementation Discrepancies
