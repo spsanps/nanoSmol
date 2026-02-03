@@ -122,10 +122,30 @@ Frame 3 → q_2    → z_3 → LLM → q_3
 - Each query is INFORMED by what was seen in previous frames
 - This is the "foveated" behavior - looking at frame t based on understanding of frames 0..t-1
 
-**Test Time Difference:**
-- At inference, the fine path must run SEQUENTIALLY (autoregressive)
-- The coarse path can run in PARALLEL (all frames use same query)
-- The fine path's advantage comes from this temporal information flow
+**⚠️ CRITICAL: Training vs Inference Mismatch**
+
+The diagram above shows TRUE INFERENCE behavior. However, TRAINING uses a parallel approximation:
+
+**Training (current `forward_captioning` with `use_fine=True`):**
+```
+1. Coarse pass: q_static → ALL frames (parallel) → z_coarse
+2. z_coarse → LLM → ALL queries at once (parallel)
+3. Fine pass: shifted queries → ALL frames (parallel) → z_fine
+4. z_fine + caption → LLM → loss
+```
+
+**TRUE Inference (no coarse pass at all):**
+```
+1. q_init → Frame 1 → z_1 → LLM → q_1
+2. q_1 → Frame 2 → z_2 → LLM → q_2
+... purely sequential, queries come from FINE features
+```
+
+**Key Difference:**
+- **Training:** Queries derived from COARSE features (z_coarse)
+- **Inference:** Queries derived from PREVIOUS FINE features (z_{t-1})
+
+This means evaluation loss with `use_fine=True` measures the training approximation, NOT true inference performance. Multi-fine training (coarse→fine₁→fine₂) partially bridges this gap.
 
 **Why This Matters:**
 - The fine path can learn to track objects, follow motion, anticipate changes
