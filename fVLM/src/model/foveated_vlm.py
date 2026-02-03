@@ -164,12 +164,12 @@ class FoveatedVideoModel(nn.Module):
             loss_fine: Pass 2 reconstruction loss (main)
             loss_coarse: Pass 1 reconstruction loss (auxiliary)
         """
-        B, T = raw_frames.shape[:2]
+        B, T, C, H, W = raw_frames.shape
         N_text = text_embeds.shape[1]
 
         # === Encode all frames with DINO, cache features ===
         # Batch process all frames at once for efficiency
-        frames_flat = raw_frames.reshape(B * T, 3, 256, 256)  # [B*T, 3, 256, 256]
+        frames_flat = raw_frames.reshape(B * T, C, H, W)  # [B*T, 3, H, W]
         _, cache_flat = self.encoder.encode_patches(frames_flat)
 
         # Reshape patch_features back to [B, T, N, D]
@@ -295,12 +295,12 @@ class FoveatedVideoModel(nn.Module):
         Returns:
             loss: Cross-entropy loss on caption tokens
         """
-        B, T = raw_frames.shape[:2]
+        B, T, C, H, W = raw_frames.shape
         L = caption_ids.shape[1]
         device = raw_frames.device
 
         # Encode all frames with DINO
-        frames_flat = raw_frames.reshape(B * T, 3, 256, 256)
+        frames_flat = raw_frames.reshape(B * T, C, H, W)
         _, cache_flat = self.encoder.encode_patches(frames_flat)
 
         patch_features_flat = cache_flat['patch_features']
@@ -414,10 +414,10 @@ class FoveatedVideoModel(nn.Module):
         Returns:
             z_visual: [B, T, llm_dim] visual embeddings ready for LLM
         """
-        B, T = raw_frames.shape[:2]
+        B, T, C, H, W = raw_frames.shape
 
         # Encode all frames with DINO
-        frames_flat = raw_frames.reshape(B * T, 3, 256, 256)
+        frames_flat = raw_frames.reshape(B * T, C, H, W)
         _, cache_flat = self.encoder.encode_patches(frames_flat)
 
         patch_features_flat = cache_flat['patch_features']

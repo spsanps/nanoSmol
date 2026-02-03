@@ -152,15 +152,21 @@ def train_model(model, model_type, tokenizer, dataloader, config, device, max_st
         captions = batch['captions']
 
         tokens = tokenizer(captions, padding=True, truncation=True, max_length=64, return_tensors='pt').to(device)
+        caption_ids = tokens['input_ids']
+        caption_mask = tokens['attention_mask']
 
         if model_type == "foveated":
-            loss, _ = model.forward_joint_multifine(
-                frames, latents, tokens['input_ids'],
-                fine_iterations=config['fine_iterations'],
-                lambda_recon=config['lambda_recon'],
-            )
+            # Use forward_captioning which takes caption_ids directly
+            # use_fine=True for fine iterations > 0
+            use_fine = config['fine_iterations'] > 0
+            loss = model.forward_captioning(frames, caption_ids, caption_mask, use_fine=use_fine)
         else:
-            loss = model.forward_caption(frames, tokens['input_ids'])
+            # BaselineVLM.forward needs caption_embeds and caption_targets
+            caption_embeds = model.llm.model.embed_tokens(caption_ids)
+            caption_targets = caption_ids[:, 1:].clone()
+            # Mask padding tokens in targets
+            caption_targets[caption_targets == tokenizer.pad_token_id] = -100
+            loss, _ = model.forward(frames, caption_embeds, caption_targets)
 
         optimizer.zero_grad()
         loss.backward()
