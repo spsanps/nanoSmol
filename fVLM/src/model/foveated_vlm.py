@@ -402,6 +402,150 @@ class FoveatedVideoModel(nn.Module):
 
         return loss
 
+    def forward_autoregressive_captioning(
+        self,
+        raw_frames: torch.Tensor,
+        caption_ids: torch.Tensor,
+        caption_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        TRUE AUTOREGRESSIVE forward pass for captioning.
+
+        Unlike forward_captioning (which uses coarse features to generate queries),
+        this method generates each query from the PREVIOUS FINE features - exactly
+        as would happen during real inference.
+
+        This is the ground truth for measuring true inference loss.
+
+        Args:
+            raw_frames: [B, T, 3, 256, 256] video frames (ImageNet normalized)
+            caption_ids: [B, L] tokenized caption (target)
+            caption_mask: [B, L] attention mask for caption
+
+        Returns:
+            loss: Cross-entropy loss on caption tokens (true inference loss)
+        """
+        B, T, C, H, W = raw_frames.shape
+        L = caption_ids.shape[1]
+        device = raw_frames.device
+
+        # === Step 1: Encode all frames with DINO (parallel - this is OK) ===
+        frames_flat = raw_frames.reshape(B * T, C, H, W)
+        _, cache_flat = self.encoder.encode_patches(frames_flat)
+
+        patch_features_flat = cache_flat['patch_features']
+        N, D = patch_features_flat.shape[1], patch_features_flat.shape[2]
+        patch_features = patch_features_flat.reshape(B, T, N, D)
+
+        # Create per-frame caches
+        all_caches = []
+        if 'kv_cache' in cache_flat:
+            num_layers = len(cache_flat['kv_cache'])
+            for t in range(T):
+                frame_kv_cache = []
+                for layer_idx in range(num_layers):
+                    layer_cache = cache_flat['kv_cache'][layer_idx]
+                    K_all = layer_cache['K'].reshape(B, T, N, D)
+                    V_all = layer_cache['V'].reshape(B, T, N, D)
+                    frame_kv_cache.append({
+                        'K': K_all[:, t],
+                        'V': V_all[:, t],
+                        'layer': layer_cache['layer'],
+                    })
+                all_caches.append({
+                    'patch_features': patch_features[:, t],
+                    'kv_cache': frame_kv_cache,
+                })
+        else:
+            all_caches = [{'patch_features': patch_features[:, t]} for t in range(T)]
+
+        # === Step 2: Autoregressive visual encoding ===
+        # Key difference: queries come from PREVIOUS FINE features, not coarse
+        z_fine_list = []
+        query = self.q_init.expand(B, -1)  # Start with initial query
+
+        # Enable KV cache for incremental LLM processing
+        orig_use_cache = self.llm.config.use_cache
+        self.llm.config.use_cache = True
+
+        # Initial sequence: [<fine>]
+        fine_token = self.fine_token.expand(B, -1, -1)
+        llm_past_kv = None  # Will hold accumulated KV cache
+
+        for t in range(T):
+            # Extract features with current query (this is the "foveated" part)
+            z_t = self.encoder.query_attend(query, all_caches[t])  # [B, dino_dim]
+            z_fine_list.append(z_t)
+
+            # Project to LLM space
+            z_t_llm = self.dino_to_llm(z_t)  # [B, llm_dim]
+            z_t_llm = z_t_llm / (z_t_llm.std() + 1e-6) * self.visual_scale
+            z_t_llm = z_t_llm.unsqueeze(1)  # [B, 1, llm_dim]
+
+            # Incremental LLM forward
+            if t == 0:
+                # First frame: include mode token
+                seq_input = torch.cat([fine_token, z_t_llm], dim=1)  # [B, 2, llm_dim]
+            else:
+                # Subsequent frames: just the new visual token
+                seq_input = z_t_llm  # [B, 1, llm_dim]
+
+            outputs = self.llm.model(
+                inputs_embeds=seq_input,
+                past_key_values=llm_past_kv,
+                use_cache=True,
+            )
+            llm_past_kv = outputs.past_key_values
+
+            # Generate query for NEXT frame from current hidden state
+            if t < T - 1:
+                h_t = outputs.last_hidden_state[:, -1, :]  # [B, llm_dim]
+                query = self.llm_to_query(h_t)  # [B, query_dim]
+
+        # Stack fine features
+        z_fine = torch.stack(z_fine_list, dim=1)  # [B, T, dino_dim]
+        z_fine_llm = self.dino_to_llm(z_fine)
+        z_fine_llm = z_fine_llm / (z_fine_llm.std() + 1e-6) * self.visual_scale
+
+        # === Step 3: Compute caption loss ===
+        # Now we have the autoregressive visual features, compute caption loss
+        # Build sequence: [<fine>, z_1, ..., z_T, <video_end>, caption]
+        # But we already processed [<fine>, z_1, ..., z_T] incrementally
+        # Continue with video_end and caption
+
+        video_end = self.video_end_token.expand(B, -1, -1)  # [B, 1, llm_dim]
+        caption_embeds = self.llm.get_input_embeddings()(caption_ids)  # [B, L, llm_dim]
+
+        # Continue LLM forward with video_end + caption (using cached KV)
+        seq_caption = torch.cat([video_end, caption_embeds], dim=1)  # [B, 1+L, llm_dim]
+
+        outputs = self.llm.model(
+            inputs_embeds=seq_caption,
+            past_key_values=llm_past_kv,
+            use_cache=False,  # Don't need cache for this part
+        )
+        hidden = outputs.last_hidden_state  # [B, 1+L, llm_dim]
+
+        # Get logits for caption positions
+        # hidden[:, 0] is after video_end, predicts caption[0]
+        # hidden[:, i] predicts caption[i]
+        h_for_caption = hidden[:, :-1, :]  # [B, L, llm_dim] - shift for next-token prediction
+        logits = self.llm.lm_head(h_for_caption)  # [B, L, vocab_size]
+
+        # Cross-entropy loss
+        pad_token_id = 2  # SmolLM2 pad token
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            caption_ids.reshape(-1),
+            ignore_index=pad_token_id,
+            reduction='mean'
+        )
+
+        # Restore cache setting
+        self.llm.config.use_cache = orig_use_cache
+
+        return loss
+
     @torch.no_grad()
     def encode_video(self, raw_frames: torch.Tensor, use_fine: bool = True) -> torch.Tensor:
         """
@@ -656,6 +800,33 @@ if __name__ == "__main__":
         print(f"   ✓ q_static has gradients: {model.q_static.grad.abs().mean().item():.6f}")
     else:
         print(f"   ✗ WARNING: q_static has no gradients!")
+
+    # Test captioning methods (training vs autoregressive)
+    print("\n🔄 Testing captioning methods...")
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
+
+    # Create dummy caption
+    caption_text = "A video showing some action."
+    caption_ids = tokenizer(caption_text, return_tensors="pt", padding="max_length", max_length=32, truncation=True)
+    caption_ids_batch = caption_ids["input_ids"].expand(batch_size, -1).to(device)
+    caption_mask_batch = caption_ids["attention_mask"].expand(batch_size, -1).to(device)
+
+    model.zero_grad()
+
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        # Training-style loss (parallel approximation)
+        loss_train_fine = model.forward_captioning(raw_frames, caption_ids_batch, caption_mask_batch, use_fine=True)
+        loss_train_coarse = model.forward_captioning(raw_frames, caption_ids_batch, caption_mask_batch, use_fine=False)
+
+        # True autoregressive inference loss
+        loss_autoregressive = model.forward_autoregressive_captioning(raw_frames, caption_ids_batch, caption_mask_batch)
+
+    print(f"\n   Captioning losses:")
+    print(f"     Training (fine):       {loss_train_fine.item():.4f}")
+    print(f"     Training (coarse):     {loss_train_coarse.item():.4f}")
+    print(f"     Autoregressive (true): {loss_autoregressive.item():.4f}")
+    print(f"     Train/Inference gap:   {(loss_autoregressive.item() - loss_train_fine.item()):.4f}")
 
     print("\n" + "=" * 70)
     print("✓ FoveatedVideoModel test passed!")
