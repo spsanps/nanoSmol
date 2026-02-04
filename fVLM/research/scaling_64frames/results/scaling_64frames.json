@@ -1,0 +1,58 @@
+[
+  {
+    "config": "64-frame",
+    "model_type": "foveated",
+    "step": 100,
+    "loss_mean": 4.402115750312805,
+    "loss_std": 1.186049203064443,
+    "loss_se": 0.16773268686155363,
+    "perplexity": 81.62338079777098,
+    "n_samples": 50,
+    "flops_per_sample": 2267178000000.0,
+    "total_flops": 3627484800000000.0,
+    "visual_tokens": 64,
+    "num_frames": 64
+  },
+  {
+    "config": "64-frame",
+    "model_type": "foveated",
+    "step": 300,
+    "loss_mean": 4.149057602882385,
+    "loss_std": 1.4338522450264712,
+    "loss_se": 0.20277732913555457,
+    "perplexity": 63.37424843849592,
+    "n_samples": 50,
+    "flops_per_sample": 2267178000000.0,
+    "total_flops": 1.08824544e+16,
+    "visual_tokens": 64,
+    "num_frames": 64
+  },
+  {
+    "config": "64-frame",
+    "model_type": "baseline",
+    "step": 100,
+    "loss_mean": 4.223590798377991,
+    "loss_std": 1.2502518227097938,
+    "loss_se": 0.17681230840578727,
+    "perplexity": 68.27821794610107,
+    "n_samples": 50,
+    "flops_per_sample": 3044778000000.0,
+    "total_flops": 4871644800000000.0,
+    "visual_tokens": 1024,
+    "num_frames": 64
+  },
+  {
+    "config": "64-frame",
+    "model_type": "baseline",
+    "step": 300,
+    "loss_mean": 4.06252895116806,
+    "loss_std": 1.3960769536938167,
+    "loss_se": 0.1974350962030311,
+    "perplexity": 58.12111082713793,
+    "n_samples": 50,
+    "flops_per_sample": 3044778000000.0,
+    "total_flops": 1.46149344e+16,
+    "visual_tokens": 1024,
+    "num_frames": 64
+  }
+]

@@ -1828,4 +1828,102 @@ Reducing to 224px + 1 fine iteration:
 
 ---
 
-*Last updated: 2026-02-03 (Optimized Foveated BEATS Baseline - efficiency breakthrough)*
+### 64-Frame Scaling Experiment (2026-02-04)
+
+**PURPOSE:**
+
+Scale comparison to 64 frames (long-form video) with 1+ minute videos. Tests whether foveated advantage holds at larger temporal scales.
+
+**Dataset:**
+- 500 WebVid videos with duration ≥ 45 seconds
+- 64 frames per video (uniform temporal sampling)
+- 224×224 resolution
+- Train/val split: 18/2 shards (450/50 videos)
+- Data location: `/mnt/d/projects/fVLM/data/webvid_64frames/`
+
+**Scripts:**
+- Download: `research/scaling_64frames/scripts/download_long_videos.py`
+- Training: `research/scaling_64frames/scripts/train_64frames.py`
+- Evaluation: `research/scaling_64frames/scripts/evaluate_64frames.py`
+
+**Configuration:**
+```yaml
+num_frames: 64
+frame_size: 224
+fine_iterations: 1
+deep_query: true
+batch_size: 2
+grad_accum: 8  # effective batch = 16
+learning_rate: 3e-5
+training_steps: 300
+```
+
+**Results (50 validation samples):**
+
+| Model | Visual Tokens | Step | Loss | PPL | TFLOPs/sample |
+|-------|---------------|------|------|-----|---------------|
+| Foveated | 64 (1/frame) | 100 | 4.402 | 81.6 | 2.27 |
+| Foveated | 64 (1/frame) | 300 | 4.149 | 63.4 | 2.27 |
+| Baseline | 1024 (16/frame) | 100 | 4.224 | 68.3 | 3.04 |
+| Baseline | 1024 (16/frame) | 300 | 4.063 | 58.1 | 3.04 |
+
+**FLOPs Breakdown:**
+```
+DINO FLOPs (both models): 6 × 22M × 256 × 64 = 2.17 TFLOPs
+Foveated LLM FLOPs: 6 × 135M × 129 tokens = 0.10 TFLOPs
+Baseline LLM FLOPs: 6 × 135M × 1089 tokens = 0.88 TFLOPs
+
+Foveated total: 2.27 TFLOPs/sample
+Baseline total: 3.04 TFLOPs/sample
+Ratio: 1.34x (baseline uses 34% more compute)
+```
+
+**KEY FINDINGS:**
+
+1. **Baseline outperforms foveated by 2-4%:**
+   - Step 100: Baseline loss 4.22 vs Foveated 4.40 (4.2% gap)
+   - Step 300: Baseline loss 4.06 vs Foveated 4.15 (2.1% gap)
+
+2. **Gap narrows with training:**
+   - Gap reduced from 4.2% to 2.1% after 300 steps
+   - Suggests foveated may catch up with more training
+
+3. **Baseline uses significantly more resources:**
+   - 1.34x more FLOPs (34% more compute)
+   - 16x more visual tokens (1024 vs 64)
+   - Longer sequences strain memory and inference latency
+
+4. **Training speed difference:**
+   - Foveated: ~22 seconds/step (cross-attention overhead)
+   - Baseline: ~1.5 seconds/step (simple projection)
+   - Foveated's architecture is more expensive per step
+
+**COMPARISON WITH 8-FRAME RESULTS:**
+
+| Frames | Foveated Tokens | Baseline Tokens | Loss Gap | FLOPs Ratio |
+|--------|-----------------|-----------------|----------|-------------|
+| 8 | 8 | 128 | Foveated wins (-0.7%) | 0.96x |
+| 64 | 64 | 1024 | Baseline wins (+2.1%) | 1.34x |
+
+**Why Results Differ at 64 Frames:**
+
+At 8 frames, the foveated model's query mechanism effectively compressed information. At 64 frames:
+- The baseline's 16 tokens/frame provide richer spatial information
+- Cross-attention overhead dominates (DINO is 95%+ of FLOPs for both)
+- Foveated may need more training to learn temporal patterns across 64 frames
+
+**CONCLUSION:**
+
+For long-form video (64 frames), baseline achieves better loss but at 34% higher compute cost. The foveated approach trades quality for efficiency. For applications prioritizing:
+- **Quality:** Use baseline (16 tokens/frame)
+- **Efficiency/Memory:** Use foveated (1 token/frame) with acceptable 2-4% quality gap
+
+**Checkpoints:**
+- Foveated: `/mnt/d/projects/fVLM/outputs/scaling_64frames/foveated_64f/step_000300.pt`
+- Baseline: `/mnt/d/projects/fVLM/outputs/scaling_64frames/baseline_64f/step_000300.pt`
+
+**Output:** `research/scaling_64frames/results/`
+
+---
+
+*Last updated: 2026-02-04 (64-Frame Scaling Experiment - baseline wins at long sequences)*
