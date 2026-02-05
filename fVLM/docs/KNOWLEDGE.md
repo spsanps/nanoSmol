@@ -426,6 +426,27 @@ else:
 
 ## Training Insights
 
+### ⚠️ CRITICAL: Never Train More Than 1 Epoch
+
+**Rule:** Always ensure `training_steps * effective_batch_size < total_train_samples`
+
+**Why:** Training beyond 1 epoch causes overfitting, leading to:
+- Train loss decreasing while eval loss increases
+- Meaningless results that don't generalize
+
+**Example of violation (Full Comparison 64F):**
+- Dataset: 18 train samples
+- Config: 300 steps × 16 batch = 4800 sample iterations
+- Result: 267 epochs → massive overfitting, invalid results
+
+**Before training, always calculate:**
+```python
+epochs = (max_steps * effective_batch) / num_train_samples
+assert epochs <= 1.0, f"Would train {epochs:.1f} epochs - reduce steps!"
+```
+
+---
+
 ### Observation: Fine/Coarse Ratio Stays at 1.0 (Historical)
 
 **Date:** 2026-01-02 to 2026-01-04
@@ -1926,4 +1947,76 @@ For long-form video (64 frames), baseline achieves better loss but at 34% higher
 
 ---
 
-*Last updated: 2026-02-04 (64-Frame Scaling Experiment - baseline wins at long sequences)*
+### Full Comparison: Foveated vs Baseline with Reconstruction Ablation
+
+**Date:** 2026-02-05
+
+> ⚠️ **64F RESULTS UNRELIABLE:** Massive overfitting due to tiny dataset. See analysis below.
+
+**Objective:** Compare foveated VLM (1 token/frame) vs baseline VLM (16 tokens/frame) with and without reconstruction loss.
+
+**Experiments:**
+1. Foveated 8F + Recon (caption + 0.5*reconstruction loss)
+2. Foveated 8F - Recon (caption only, ablation)
+3. Baseline 8F (caption only)
+4. Foveated 64F + Recon
+5. Foveated 64F - Recon
+6. Baseline 64F
+
+**Configuration:**
+- 8-frame: batch=4, grad_accum=4, 300 steps, 256px
+- 64-frame: batch=2, grad_accum=8, 300 steps, 224px
+- Effective batch size: 16 samples/step for both
+
+**⚠️ ROOT CAUSE: Dataset Size Mismatch (64F Results Invalid)**
+
+| Dataset | Train Shards | Samples/Shard | Total Train | Epochs @300 steps |
+|---------|--------------|---------------|-------------|-------------------|
+| 8F | 462 | ~2 | ~924 | **~5 epochs** |
+| 64F | 18 | ~1 | ~18 | **~267 epochs!!!** |
+
+**The 64F models saw each sample 267 times vs 8F seeing each sample 5 times.**
+
+This explains ALL observed behavior:
+1. **64F train loss keeps dropping** (2.21 at step 300) - memorizing training data
+2. **64F eval loss increases** (3.92→4.42) - classic overfitting curve
+3. **Both baseline and foveated 64F overfit** - it's the data, not the model
+4. **8F results are stable** - reasonable number of epochs, no overfitting
+
+**Results:**
+
+| Experiment | Train Loss @300 | Eval Loss @100 | Eval Loss @300 | Tokens | Status |
+|------------|-----------------|----------------|----------------|--------|--------|
+| **baseline_8f** | 3.94 | 4.39 | 4.40 | 128 | ✓ Valid |
+| **foveated_8f_norecon** | - | 4.69 | 4.43 | 8 | ✓ Valid |
+| **foveated_8f_recon** | - | 5.12 | 5.14 | 8 | ✓ Valid |
+| baseline_64f | 2.21 | 3.92 | 4.42 ↑ | 1024 | ⚠️ Overfit |
+| foveated_64f_norecon | 1.65 | 4.04 | 4.53 ↑ | 64 | ⚠️ Overfit |
+| foveated_64f_recon | 1.88 | 4.60 | 5.26 ↑ | 64 | ⚠️ Overfit |
+
+**Valid Conclusions (8F Only):**
+
+1. **Reconstruction hurts captioning**: foveated_8f_recon (5.14) vs foveated_8f_norecon (4.43) = **+0.71 worse**
+   - Multi-task training with reconstruction interferes with caption learning
+
+2. **Baseline slightly better than foveated_norecon**: 4.40 vs 4.43 = **+0.03 worse**
+   - But foveated uses **16x fewer tokens** (8 vs 128)!
+   - Trade-off: 0.7% worse loss for 16x token efficiency
+
+3. **Foveated (no recon) nearly matches baseline** with 16x compression
+
+**What This Means:**
+- Reconstruction loss hurts captioning (unexpected, need to investigate why)
+- Pure caption training (foveated_norecon) achieves near-baseline performance with 16x fewer tokens
+- 64F experiments need to be re-run with larger dataset to get valid results
+
+**To Fix 64F Experiments:**
+- Use 8F dataset (513 shards) sampled at 64 frames
+- Or precompute more 64F data (target: 500+ shards, not 20)
+- Reduce steps to ~50 (to stay under 5 epochs on current data)
+
+**Output:** `/mnt/d/projects/fVLM/outputs/full_comparison/`
+
+---
+
+*Last updated: 2026-02-05 (Corrected analysis: 64F overfit due to tiny dataset, 8F results valid)*
