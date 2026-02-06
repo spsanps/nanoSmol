@@ -660,9 +660,10 @@ def generate_plots(all_results, output_dir):
     }
 
     for exp, data in by_exp.items():
-        step_300 = [d for d in data if d['step'] == 300]
-        if step_300:
-            final_losses[exp] = step_300[0]['loss_mean']
+        # Use the last checkpoint (highest step) as final
+        if data:
+            last = max(data, key=lambda d: d['step'])
+            final_losses[exp] = last['loss_mean']
 
     x_labels = []
     losses_plot = []
@@ -682,7 +683,7 @@ def generate_plots(all_results, output_dir):
     ax.set_xticks(x)
     ax.set_xticklabels(x_labels, rotation=15, ha='right')
     ax.set_ylabel('Caption Loss (CE)')
-    ax.set_title('Final Caption Loss @ Step 300')
+    ax.set_title('Final Caption Loss (Best Checkpoint)')
     ax.grid(True, alpha=0.3, axis='y')
 
     # Add value labels
