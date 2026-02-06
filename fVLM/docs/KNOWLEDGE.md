@@ -1947,76 +1947,60 @@ For long-form video (64 frames), baseline achieves better loss but at 34% higher
 
 ---
 
-### Full Comparison: Foveated vs Baseline with Reconstruction Ablation
+### Full Comparison v2: Foveated vs Baseline (< 1 Epoch Training)
 
 **Date:** 2026-02-05
 
-> ⚠️ **64F RESULTS UNRELIABLE:** Massive overfitting due to tiny dataset. See analysis below.
+**Objective:** Compare foveated VLM (1 token/frame) vs baseline VLM (16 tokens/frame) with proper training (< 1 epoch).
 
-**Objective:** Compare foveated VLM (1 token/frame) vs baseline VLM (16 tokens/frame) with and without reconstruction loss.
-
-**Experiments:**
-1. Foveated 8F + Recon (caption + 0.5*reconstruction loss)
-2. Foveated 8F - Recon (caption only, ablation)
-3. Baseline 8F (caption only)
-4. Foveated 64F + Recon
-5. Foveated 64F - Recon
-6. Baseline 64F
+**Key Fix:** Generated 5000 64F samples to enable proper training without overfitting.
 
 **Configuration:**
-- 8-frame: batch=4, grad_accum=4, 300 steps, 256px
-- 64-frame: batch=2, grad_accum=8, 300 steps, 224px
+- 8-frame: batch=4, grad_accum=4, **50 steps** (< 1 epoch on 924 samples), 256px
+- 64-frame: batch=2, grad_accum=8, **280 steps** (< 1 epoch on 4500 samples), 224px
 - Effective batch size: 16 samples/step for both
 
-**⚠️ ROOT CAUSE: Dataset Size Mismatch (64F Results Invalid)**
+**Results (All Valid - Losses Decreasing):**
 
-| Dataset | Train Shards | Samples/Shard | Total Train | Epochs @300 steps |
-|---------|--------------|---------------|-------------|-------------------|
-| 8F | 462 | ~2 | ~924 | **~5 epochs** |
-| 64F | 18 | ~1 | ~18 | **~267 epochs!!!** |
+| Experiment | Eval Loss (early) | Eval Loss (final) | Tokens | Trend |
+|------------|-------------------|-------------------|--------|-------|
+| **baseline_8f** | 5.48 @25 | **5.05** @50 | 128 | ✓ ↓ |
+| **foveated_8f_norecon** | 5.68 @25 | **5.35** @50 | 8 | ✓ ↓ |
+| **foveated_8f_recon** | 5.92 @25 | **5.70** @50 | 8 | ✓ ↓ |
+| **baseline_64f** | 4.40 @100 | **4.13** @280 | 1024 | ✓ ↓ |
+| **foveated_64f_norecon** | 4.47 @100 | **4.24** @280 | 64 | ✓ ↓ |
+| **foveated_64f_recon** | 5.12 @100 | **4.96** @280 | 64 | ✓ ↓ |
 
-**The 64F models saw each sample 267 times vs 8F seeing each sample 5 times.**
+**Key Findings:**
 
-This explains ALL observed behavior:
-1. **64F train loss keeps dropping** (2.21 at step 300) - memorizing training data
-2. **64F eval loss increases** (3.92→4.42) - classic overfitting curve
-3. **Both baseline and foveated 64F overfit** - it's the data, not the model
-4. **8F results are stable** - reasonable number of epochs, no overfitting
+1. **No more overfitting!** All losses decrease from early to final checkpoint.
 
-**Results:**
+2. **8F Comparison:**
+   - Baseline: 5.05
+   - Foveated (no recon): 5.35 (+0.30, 6% worse)
+   - Foveated (with recon): 5.70 (+0.65, 13% worse)
+   - **Baseline wins, but foveated uses 16x fewer tokens**
 
-| Experiment | Train Loss @300 | Eval Loss @100 | Eval Loss @300 | Tokens | Status |
-|------------|-----------------|----------------|----------------|--------|--------|
-| **baseline_8f** | 3.94 | 4.39 | 4.40 | 128 | ✓ Valid |
-| **foveated_8f_norecon** | - | 4.69 | 4.43 | 8 | ✓ Valid |
-| **foveated_8f_recon** | - | 5.12 | 5.14 | 8 | ✓ Valid |
-| baseline_64f | 2.21 | 3.92 | 4.42 ↑ | 1024 | ⚠️ Overfit |
-| foveated_64f_norecon | 1.65 | 4.04 | 4.53 ↑ | 64 | ⚠️ Overfit |
-| foveated_64f_recon | 1.88 | 4.60 | 5.26 ↑ | 64 | ⚠️ Overfit |
+3. **64F Comparison:**
+   - Baseline: 4.13
+   - Foveated (no recon): 4.24 (+0.11, 2.7% worse)
+   - Foveated (with recon): 4.96 (+0.83, 20% worse)
+   - **Foveated nearly matches baseline with 16x fewer tokens!**
 
-**Valid Conclusions (8F Only):**
-
-1. **Reconstruction hurts captioning**: foveated_8f_recon (5.14) vs foveated_8f_norecon (4.43) = **+0.71 worse**
+4. **Reconstruction consistently hurts captioning:**
+   - 8F: +0.35 loss (foveated_recon vs foveated_norecon)
+   - 64F: +0.72 loss (foveated_recon vs foveated_norecon)
    - Multi-task training with reconstruction interferes with caption learning
 
-2. **Baseline slightly better than foveated_norecon**: 4.40 vs 4.43 = **+0.03 worse**
-   - But foveated uses **16x fewer tokens** (8 vs 128)!
-   - Trade-off: 0.7% worse loss for 16x token efficiency
+**Conclusions:**
 
-3. **Foveated (no recon) nearly matches baseline** with 16x compression
+- **Foveated (no recon) is viable:** Only 2.7% worse than baseline at 64F with 16x compression
+- **Reconstruction should be dropped** for captioning tasks
+- **Longer sequences favor foveated:** Gap shrinks from 6% (8F) to 2.7% (64F)
+- **Token efficiency:** Foveated uses 64 tokens vs baseline's 1024 for 64 frames
 
-**What This Means:**
-- Reconstruction loss hurts captioning (unexpected, need to investigate why)
-- Pure caption training (foveated_norecon) achieves near-baseline performance with 16x fewer tokens
-- 64F experiments need to be re-run with larger dataset to get valid results
-
-**To Fix 64F Experiments:**
-- Use 8F dataset (513 shards) sampled at 64 frames
-- Or precompute more 64F data (target: 500+ shards, not 20)
-- Reduce steps to ~50 (to stay under 5 epochs on current data)
-
-**Output:** `/mnt/d/projects/fVLM/outputs/full_comparison/`
+**Output:** `/mnt/d/projects/fVLM/outputs/full_comparison_v2/`
 
 ---
 
-*Last updated: 2026-02-05 (Corrected analysis: 64F overfit due to tiny dataset, 8F results valid)*
+*Last updated: 2026-02-05 (Valid results with < 1 epoch training)*

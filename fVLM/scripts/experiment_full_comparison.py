@@ -37,10 +37,12 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 # Paths
 DATA_8F = Path("/mnt/d/projects/fVLM/data/frames_latents_sharded")
-DATA_64F = Path("/mnt/d/projects/fVLM/data/webvid_64frames/shards")
-OUTPUT_BASE = Path("/mnt/d/projects/fVLM/outputs/full_comparison")
+DATA_64F = Path("/mnt/d/projects/fVLM/data/webvid_64f_5k/shards")  # New 5K dataset
+OUTPUT_BASE = Path("/mnt/d/projects/fVLM/outputs/full_comparison_v2")  # Fresh output dir
 
-# Configs
+# Configs - CRITICAL: max_steps must be < 1 epoch
+# 8F: ~924 samples / 16 batch = 58 steps/epoch -> use 50 steps
+# 64F: ~5000 samples / 16 batch = 312 steps/epoch -> use 300 steps
 CONFIGS = {
     '8f': {
         'data_dir': DATA_8F,
@@ -48,17 +50,17 @@ CONFIGS = {
         'batch_size': 4,
         'grad_accum': 4,
         'frame_size': 256,
-        'max_steps': 300,
-        'checkpoints': [100, 300],
+        'max_steps': 50,  # < 1 epoch (58 steps/epoch)
+        'checkpoints': [25, 50],
     },
     '64f': {
         'data_dir': DATA_64F,
         'num_frames': 64,
         'batch_size': 2,
         'grad_accum': 8,
-        'frame_size': 224,  # 64-frame data uses 224
-        'max_steps': 300,
-        'checkpoints': [100, 300],
+        'frame_size': 224,
+        'max_steps': 280,  # < 1 epoch (4500 samples / 16 batch = 281 steps/epoch)
+        'checkpoints': [100, 280],
     },
 }
 
