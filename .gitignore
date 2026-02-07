@@ -58,6 +58,9 @@ artifacts/
 outputs/
 reports/
 
+# Generated plots (PDFs redundant with PNGs)
+*.pdf
+
 # Temporary
 tmp/
 temp/
