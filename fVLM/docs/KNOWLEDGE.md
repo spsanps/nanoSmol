@@ -174,6 +174,16 @@ To produce scientifically valid results:
 | `experiment_sparse_frames.py` | Sparse temporal sampling (1 FPS) | ratio=1.0, sparsity doesn't help |
 | `experiment_multi_fine.py` | Multi-fine iteration (coarse→fine→fine→fine) | ratio=1.108, iter loss decreases |
 
+### Scaling Law Scripts
+
+| Script | Purpose | Output |
+|--------|---------|--------|
+| `research/scaling_laws/scripts/run_comprehensive_scaling.py` | 12-run scaling study (3 sizes × 2 frames × 2 archs) | `scaling_comprehensive/` |
+| `research/scaling_laws/scripts/plot_scaling_fits.py` | Power law fitting, Chinchilla analysis, SmolVLM extrapolation | `scaling_comprehensive/scaling_analysis/` |
+| `research/scaling_laws/scripts/plot_scaling_laws.py` | Earlier scaling law plots | `scaling_laws/plots/` |
+| `research/scaling_laws/scripts/evaluate_all_configs.py` | Multi-config evaluation | Various |
+| `scripts/precompute_8f.py` | Precompute 5000 8-frame samples from WebVid | `data/webvid_8f_5k/` |
+
 ### Evaluation Scripts
 
 | Script | Purpose | Output |
@@ -2003,4 +2013,114 @@ For long-form video (64 frames), baseline achieves better loss but at 34% higher
 
 ---
 
-*Last updated: 2026-02-05 (Valid results with < 1 epoch training)*
+### Comprehensive Scaling Law Experiments (2026-02-06)
+
+**PURPOSE:**
+
+Dense scaling curves across 3 model sizes × 2 frame counts × 2 architectures (12 runs), with proper batching (auto-profiled), GPU monitoring, and power-law curve fitting to extrapolate to SmolVLM-scale compute.
+
+**Script:** `research/scaling_laws/scripts/run_comprehensive_scaling.py`
+**Analysis:** `research/scaling_laws/scripts/plot_scaling_fits.py`
+
+**Model Configs:**
+
+| Config | LLM | DINO | Fov Params | Bas Params |
+|--------|-----|------|-----------|-----------|
+| S-S | SmolLM2-135M | dinov2-small | 159M | 172M |
+| M-S | SmolLM2-360M | dinov2-small | 386M | 411M |
+| S-B | SmolLM2-135M | dinov2-base | 224M | 251M |
+
+**Training:** 280 steps × EB=16 = 4,480 samples (< 1 epoch on 4,500 train samples), eval every 14 steps = 20 data points per run. Auto-profiled batch sizes (8 for 8F, 2-4 for 64F).
+
+**BUG FOUND & FIXED:** Training loop had a critical batching bug — samples were always processed one-at-a-time (`unsqueeze(0)`) regardless of batch config. Real EB = grad_accum only, FLOPs were overcounted. All previous results were invalidated and re-run with proper DataLoader batching.
+
+**Results (10/12 runs complete, 204 data points):**
+
+| Run | Loss (train) | Loss (infer) | Gap | FLOPs | Batch |
+|-----|-------------|-------------|-----|-------|-------|
+| M-S_8f_fov | 3.744 | 3.745 | 0.02% | 4.83e15 | 8 |
+| M-S_8f_bas | 3.658 | 3.658 | 0.00% | 6.19e15 | 8 |
+| M-S_64f_fov | 3.892 | 3.914 | 0.56% | 1.22e16 | 4 |
+| M-S_64f_bas | 3.745 | 3.745 | 0.00% | 3.63e16 | 2 |
+| S-S_8f_fov | 4.012 | 4.015 | 0.08% | 2.18e15 | 8 |
+| S-S_8f_bas | 3.902 | 3.902 | 0.00% | 2.69e15 | 8 |
+| S-S_64f_fov | 4.138 | 4.141 | 0.09% | 7.54e15 | 4 |
+| S-S_64f_bas | 4.019 | 4.019 | 0.00% | 1.66e16 | 4 |
+| S-B_8f_fov | 4.029 | 4.024 | 0.14% | 3.91e15 | 8 |
+| S-B_8f_bas | 3.936 | 3.936 | 0.00% | 4.42e15 | 8 |
+
+**Foveated vs Baseline Efficiency:**
+
+| Config | Loss Gap | FLOPs Savings | Token Ratio |
+|--------|---------|---------------|-------------|
+| M-S 8F | +2.4% | 1.28x | 16x |
+| M-S 64F | +3.9% | 2.97x | 16x |
+| S-S 8F | +2.8% | 1.23x | 16x |
+| S-S 64F | +3.0% | 2.20x | 16x |
+| S-B 8F | +2.4% | 1.13x | 16x |
+
+**KEY FINDINGS:**
+
+1. **Foveated is consistently 2-4% worse in loss** but uses 1.1-3x fewer FLOPs. The efficiency advantage grows with frame count (1.28x at 8F → 2.97x at 64F).
+
+2. **LLM size dominates DINO size:** M-S (360M LLM) achieves 3.74 loss vs S-S (135M LLM) at 4.01 = 7% improvement from LLM scaling. S-B (135M LLM + bigger DINO) at 4.03 shows <1% improvement from larger DINO.
+
+3. **64F worse than 8F at this data scale:** All configs show 64F is 2-4% worse than 8F. Training budget is identical (4,480 samples), but 64F requires more computation per sample. Models haven't learned temporal patterns with only 5K training samples.
+
+4. **Train/inference gap is negligible (<0.6%):** Parallel training approximation (queries from coarse features) matches true autoregressive inference (queries from fine features). Validates the training recipe.
+
+5. **Massively data-starved:** Chinchilla ratio D/N ≈ 1e-5, optimal is D/N ≈ 20. All training curves still dropping steeply at step 280. Power law extrapolations are unreliable — fitting early-training regime, not actual scaling behavior.
+
+**Power Law Fits (L(C) = A·C^(-α) + L∞):**
+
+| Group | A | α | L∞ | R² |
+|-------|---|---|-----|-----|
+| Foveated 64F | 4.25e7 | 0.486 | 3.184 | 0.864 |
+| Baseline 64F | 6.62e9 | 0.621 | 3.356 | 0.892 |
+| Foveated 8F | 66.12 | 0.114 | 3.074 | 0.344 |
+| Baseline 8F | 62.93 | 0.113 | 3.004 | 0.363 |
+
+64F fits have good R² (0.86-0.89) because of wider FLOPs spread. 8F fits have low R² because data is clustered at similar FLOPs. The L∞ values (3.0-3.4) are unreliable — they reflect the data-starved regime, not true irreducible loss.
+
+**Model Size Extrapolation to 1.7B (at 4,480 samples):**
+
+| Config | Foveated Pred | Baseline Pred |
+|--------|-------------|---------------|
+| 8F @ 1.7B | 3.349 | 3.320 |
+| 64F @ 1.7B | 3.788 | 3.585 |
+
+**Wall-Clock Performance:**
+
+| Run | Time/Step | Samples/s | Notes |
+|-----|-----------|-----------|-------|
+| M-S_8f_fov | 2.3s | 7.3 | Includes eval every 14 steps |
+| M-S_8f_bas | 0.59s | 28.5 | 4x faster than foveated |
+| M-S_64f_fov | 41s | 0.31 | Autoregressive eval bottleneck |
+| M-S_64f_bas | 3.3s | 5.4 | 12x faster than fov at 64F |
+
+Foveated ~4x slower per step at 8F (2 LLM passes + autoregressive eval). At 64F, autoregressive eval dominates (41s/step vs 3.3s baseline).
+
+**Plots:** `scaling_comprehensive/scaling_analysis/` (9 plots: loss_vs_flops_fitted, training_curves, model_size_scaling, efficiency_frontier, smolvlm_extrapolation, token_efficiency, perplexity_vs_flops, iso_flop_curves, chinchilla_ratio)
+
+**Data:** `/mnt/d/projects/fVLM/outputs/scaling_comprehensive/results.json` (204 data points)
+
+**SmolVLM Comparison:**
+
+SmolVLM uses SigLIP + SmolLM2 + PixelShuffle(r=4) = 81 tokens per 384×384 image. Our baseline uses PixelShuffle(r=4) = 16 tokens per 224×224 frame. Our foveated uses 1 token per frame.
+
+| Architecture | Tokens/frame | Quality (rel. to baseline) | FLOPs (rel.) |
+|-------------|-------------|--------------------------|-------------|
+| SmolVLM | 81 | Reference | Reference |
+| Our Baseline | 16 | Same framework | ~5x fewer |
+| Our Foveated | 1 | 2-4% worse | 1.1-3x fewer than baseline |
+
+**Conclusions for Cluster Run:**
+- Scale LLM to 1.7B (model size is the dominant lever)
+- Keep DINOv2-small (bigger DINO gives <1% benefit)
+- Need 100x-1000x more data (currently at D/N=1e-5 vs optimal 20)
+- Fov/bas gap of 2-4% likely stable at scale; value proposition is inference efficiency (16x fewer visual tokens, 1.1-3x fewer FLOPs)
+- Cannot reliably predict final loss from these experiments due to extreme data starvation
+
+---
+
+*Last updated: 2026-02-06 (Comprehensive scaling law experiments)*
