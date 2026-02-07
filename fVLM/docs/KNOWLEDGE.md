@@ -2059,9 +2059,22 @@ Dense scaling curves across 3 model sizes × 2 frame counts × 2 architectures (
 | S-S 64F | +3.0% | 2.20x | 16x |
 | S-B 8F | +2.4% | 1.13x | 16x |
 
+**Parameter-Corrected Architecture Gap (2026-02-06):**
+
+Baseline has more parameters than foveated in every config pair (extra PixelShuffle projection vs query attention). This creates a confound: some of the raw loss gap is due to parameter count, not architecture.
+
+| Config | Fov Params | Bas Params | Extra % | Raw Gap | Param Confound | True Arch Gap |
+|--------|-----------|-----------|---------|---------|----------------|---------------|
+| S-S 64F | 159M | 172M | +8.2% | +2.81% | ~0.37% | **+2.44%** |
+| M-S 64F | 386M | 411M | +6.5% | +2.37% | ~0.77% | **+1.60%** |
+
+**Method:** Bidirectional interpolation — (1) interpolate baseline loss curve at foveated param count, (2) interpolate foveated loss curve at baseline param count. Both directions agree closely (within 0.1%), validating the estimates.
+
+**Implication:** The true architectural gap shrinks with LLM scale (2.44% → 1.60% from 135M → 360M). At 1.7B, the gap could be ~1% or less, making foveated's 16x token efficiency even more compelling.
+
 **KEY FINDINGS:**
 
-1. **Foveated is consistently 2-4% worse in loss** but uses 1.1-3x fewer FLOPs. The efficiency advantage grows with frame count (1.28x at 8F → 2.97x at 64F).
+1. **Foveated is consistently 2-4% worse in loss** but uses 1.1-3x fewer FLOPs. After correcting for parameter count difference, the **true architectural gap is 1.6-2.4%** (not 2.4-2.8%). The efficiency advantage grows with frame count (1.28x at 8F → 2.97x at 64F).
 
 2. **LLM size dominates DINO size:** M-S (360M LLM) achieves 3.74 loss vs S-S (135M LLM) at 4.01 = 7% improvement from LLM scaling. S-B (135M LLM + bigger DINO) at 4.03 shows <1% improvement from larger DINO.
 
@@ -2118,7 +2131,7 @@ SmolVLM uses SigLIP + SmolLM2 + PixelShuffle(r=4) = 81 tokens per 384×384 image
 - Scale LLM to 1.7B (model size is the dominant lever)
 - Keep DINOv2-small (bigger DINO gives <1% benefit)
 - Need 100x-1000x more data (currently at D/N=1e-5 vs optimal 20)
-- Fov/bas gap of 2-4% likely stable at scale; value proposition is inference efficiency (16x fewer visual tokens, 1.1-3x fewer FLOPs)
+- True fov/bas architectural gap is 1.6-2.4% (after correcting for param count confound), shrinking with LLM scale — likely ~1% at 1.7B. Value proposition is inference efficiency (16x fewer visual tokens, 1.1-3x fewer FLOPs)
 - Cannot reliably predict final loss from these experiments due to extreme data starvation
 
 ---
