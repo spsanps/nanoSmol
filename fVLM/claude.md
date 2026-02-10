@@ -9,6 +9,12 @@
 **LIVING DOCUMENTS** (Update as you learn):
 3. `docs/KNOWLEDGE.md` - Bugs, fixes, experiments, insights
 4. `CLAUDE.md` - This file (debugging checklists, quick reference)
+5. `docs/RESEARCH_PLAYBOOK.md` - Research methodology, scaling, presentation guide (distilled from nanochat/SmolLM/SmolVLM)
+6. `docs/SCALING_PLAN.md` - Release-scale plan: 3M+ samples, 2-4xA100, $500 budget, ablations, scaling laws, deliverables
+
+**RUNPOD CONTEXT** (read `docs/runpod/` first if freshly invoked on RunPod):
+7. `docs/runpod/BRIEFING.md` - Complete project context dump for fresh invocations
+8. `docs/runpod/SMOLVLM2_REFERENCE.md` - SmolVLM2 training details (stages, data, benchmarks)
 
 **Always refer to these docs before making architectural or implementation decisions.**
 

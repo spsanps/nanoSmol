@@ -53,3 +53,10 @@ wandb/
 outputs/**/frames/
 outputs/**/attention_maps/
 .gradio/
+
+# External references (large text dumps, cloned repos)
+external/
+docs/external_refs/
+
+# PDF outputs (redundant with PNGs)
+*.pdf
