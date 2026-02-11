@@ -1,0 +1,75 @@
+# =============================================================================
+# Ablation LR3: 50x/10x Ratio (High Connector, Medium Backbone)
+# =============================================================================
+# connector=5e-4, dino=1e-5, llm=5e-5
+# Connector:DINO ratio = 50:1, Connector:LLM ratio = 10:1
+#
+# Change from baseline:
+#   lr_connector: 1e-4  -->  5e-4
+#   lr_llm:       1e-5  -->  5e-5
+#
+# Hypothesis: The connector may benefit from an even more aggressive
+# learning rate.  At 5e-4, the randomly-initialized projections and query
+# parameters can establish alignment with the pretrained embeddings faster.
+# The LLM gets a modest 5x bump to help it adapt to visual tokens.
+# DINO stays at 1e-5 (same as baseline).
+#
+# Risk: 5e-4 for the connector may be unstable.  Watch for loss spikes
+# and gradient norm explosions in the first 1K steps.
+#
+# Expected runtime: ~2h on 2xA100-80GB
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-135M-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false
+
+data:
+  train_shards: "/workspace/data/webvid/{00000..00359}.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 4
+
+training:
+  total_samples: 360_000
+  batch_size: 16
+  grad_accum: 2
+  lr_connector: 5.0e-4    # <-- ABLATION: 5x higher than baseline
+  lr_dino: 1.0e-5
+  lr_llm: 5.0e-5          # <-- ABLATION: 5x higher than baseline
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: cosine
+  dtype: bfloat16
+  compile: true
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/ablations/LR3
+  save_every_steps: 500
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 250
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-ablations
+  run_name: LR3_50x_10x_ratio
