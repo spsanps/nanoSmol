@@ -304,25 +304,69 @@ These are instruction-formatted and don't need the video2dataset pipeline — th
 
 ---
 
+## CRITICAL: Redirect All Caches to /workspace
+
+**System disk (`/`) is only 5GB.** It WILL fill up and crash the pod if you install things to default locations. **ALL caches, packages, and temp files must go to `/workspace`.**
+
+Run this FIRST on every new pod (before installing anything):
+
+```bash
+# Create workspace directories
+mkdir -p /workspace/.cache /workspace/.local /workspace/tmp /workspace/.npm /workspace/.pip
+
+# Redirect everything
+export HOME=/workspace
+export TMPDIR=/workspace/tmp
+export TEMP=/workspace/tmp
+export TMP=/workspace/tmp
+export PIP_CACHE_DIR=/workspace/.pip/cache
+export HF_HOME=/workspace/.cache/huggingface
+export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
+export XDG_CACHE_HOME=/workspace/.cache
+export NPM_CONFIG_PREFIX=/workspace/.npm-global
+export PATH="/workspace/.npm-global/bin:/workspace/.local/bin:$PATH"
+
+# Make persistent across shell sessions
+cat >> /workspace/.bashrc_runpod << 'ENVEOF'
+export HOME=/workspace
+export TMPDIR=/workspace/tmp
+export TEMP=/workspace/tmp
+export TMP=/workspace/tmp
+export PIP_CACHE_DIR=/workspace/.pip/cache
+export HF_HOME=/workspace/.cache/huggingface
+export HUGGINGFACE_HUB_CACHE=/workspace/.cache/huggingface/hub
+export XDG_CACHE_HOME=/workspace/.cache
+export NPM_CONFIG_PREFIX=/workspace/.npm-global
+export PATH="/workspace/.npm-global/bin:/workspace/.local/bin:$PATH"
+ENVEOF
+echo 'source /workspace/.bashrc_runpod' >> ~/.bashrc
+```
+
+**This persists on the network volume** — when you terminate a CPU pod and start a GPU pod on the same volume, the caches and installed packages survive. Only system packages (apt) need reinstalling.
+
+---
+
 ## First Steps When Invoked on RunPod
 
 **If on CPU pod (data precompute):**
 1. Read this file + `CLAUDE.md`
-2. Set up environment
-3. Run the CPU data prep pipeline above
-4. Verify shards: count, sample a few, check frame quality
-5. Done — terminate pod, tell user to spin up GPU pod
+2. **Run the cache redirect script above FIRST**
+3. Set up environment
+4. Run the CPU data prep pipeline above
+5. Verify shards: count, sample a few, check frame quality
+6. Done — terminate pod, tell user to spin up GPU pod
 
 **If on GPU pod (training):**
-1. Verify GPU access (`nvidia-smi`) and data at `/workspace`
-2. Read this file + `CLAUDE.md` + `docs/SCALING_PLAN.md`
-3. Clone repo, set up environment (Python, PyTorch, transformers, wandb)
-4. **Phase 1:** Profile and optimize training throughput (target 2x improvement)
-5. **Phase 2:** Run ablations at SmolLM2-135M
-6. **Phase 3:** Scaling grid → determines final model size
-7. **Phase 4:** Train final model (3-stage pipeline)
-8. **Phase 5:** Evaluate (3 modes + benchmarks)
-9. **Phase 6:** Package and release to HuggingFace
+1. **Run the cache redirect script above FIRST** (or `source /workspace/.bashrc_runpod` if it exists from CPU pod)
+2. Verify GPU access (`nvidia-smi`) and data at `/workspace`
+3. Read this file + `CLAUDE.md` + `docs/SCALING_PLAN.md`
+4. Clone repo, set up environment (Python, PyTorch, transformers, wandb)
+5. **Phase 1:** Profile and optimize training throughput (target 2x improvement)
+6. **Phase 2:** Run ablations at SmolLM2-135M
+7. **Phase 3:** Scaling grid → determines final model size
+8. **Phase 4:** Train final model (3-stage pipeline)
+9. **Phase 5:** Evaluate (3 modes + benchmarks)
+10. **Phase 6:** Package and release to HuggingFace
 
 ---
 
