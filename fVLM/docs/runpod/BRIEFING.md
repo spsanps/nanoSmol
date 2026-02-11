@@ -370,5 +370,26 @@ echo 'source /workspace/.bashrc_runpod' >> ~/.bashrc
 
 ---
 
+## Communication Between Claude Instances
+
+There are two Claude Code instances running on this project:
+
+| Instance | Where | Can do |
+|----------|-------|--------|
+| **LOCAL** | User's laptop (WSL) | SSH to RunPod, git push/pull, read/write `/workspace` via SSH |
+| **RUNPOD** | On the pod | Direct filesystem access, runs jobs, git push/pull |
+
+**Shared message board:** `/workspace/comms/BOARD.md`
+
+- **Check this file** when you start a session or before major decisions
+- **Append messages** at the bottom (never delete previous messages)
+- Format: `## [YYYY-MM-DD HH:MM] LOCAL` or `## [YYYY-MM-DD HH:MM] RUNPOD`
+- Use for: status updates, questions, handoffs, blocker reports
+- For code/config changes: use git (push from one side, pull from the other)
+
+**The user may not always be available.** When blocked, write to the board and continue on other tasks. The other Claude or the user will respond.
+
+---
+
 *Created: 2026-02-09*
 *Source: Multi-session conversation covering architecture, scaling, SmolVLM2 analysis, nanochat patterns*
