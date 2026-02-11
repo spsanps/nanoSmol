@@ -1,396 +1,148 @@
 # Claude Working Guide: Foveated VLM Project
 
-## Critical References
+## RunPod Infrastructure
 
-**AUTHORITATIVE DOCUMENTS** (Adhere strictly):
-1. `core_docs/foveated_vlm_proposal.md` - Architecture specification
-2. `core_docs/foveated_vlm_execution_guide.md` - Implementation guide
+**Pod Specs:**
+- CPU pod: 8 vCPU, 30GB RAM, ~1TB workspace at /workspace, 5GB system disk
+- GPU pod (future): 2xA100 80GB, ~$1.39/hr
 
-**LIVING DOCUMENTS** (Update as you learn):
-3. `docs/KNOWLEDGE.md` - Bugs, fixes, experiments, insights
-4. `CLAUDE.md` - This file (debugging checklists, quick reference)
-5. `docs/RESEARCH_PLAYBOOK.md` - Research methodology, scaling, presentation guide (distilled from nanochat/SmolLM/SmolVLM)
-6. `docs/SCALING_PLAN.md` - Release-scale plan: 3M+ samples, 2-4xA100, $500 budget, ablations, scaling laws, deliverables
+**CRITICAL: Cache redirects (run FIRST on every new pod):**
+```bash
+source /workspace/.bashrc_runpod
+```
+This redirects HOME, pip, HuggingFace, and tmp to /workspace (system disk is only 5GB).
 
-**RUNPOD CONTEXT** (read `docs/runpod/` first if freshly invoked on RunPod):
-7. `docs/runpod/BRIEFING.md` - Complete project context dump for fresh invocations
-8. `docs/runpod/SMOLVLM2_REFERENCE.md` - SmolVLM2 training details (stages, data, benchmarks)
+**Auth:** Credentials in `/workspace/.env` (gitignored). Re-login with:
+```bash
+source /workspace/.bashrc_runpod
+/workspace/venv311/bin/python -c "from huggingface_hub import login; import os; login(token=os.environ.get('HF_TOKEN', open('/workspace/.env').read().split('HF_TOKEN=')[1].split('\n')[0]))"
+```
 
-**Always refer to these docs before making architectural or implementation decisions.**
+**Inter-Claude Communication:** `/workspace/comms/BOARD.md` — append-only, timestamped, `LOCAL` vs `RUNPOD` source tags.
 
 ---
 
-## How to Document Knowledge
+## Canonical Codebase: `release/`
 
-When you discover something important (bug, insight, optimization), document it:
-
-### For Bugs:
-1. Add to `docs/KNOWLEDGE.md` under "Critical Bugs & Fixes"
-2. Follow format: Symptom → Root Cause → Diagnosis → Fix
-3. If it's a debugging pattern, add to CLAUDE.md "Debugging Checklist"
-
-### For Experiments:
-1. Add to `docs/KNOWLEDGE.md` under "Experiment History"
-2. Include: date, config, results, key findings
-
-### For Insights:
-1. Add to `docs/KNOWLEDGE.md` under "Training Insights" or "Architecture Notes"
-2. Include context and evidence
-
-### Commit Format:
-```
-docs: Add BUG-XXX (short description)
-```
-
----
-
-## Code Organization
+The `release/` folder is THE codebase. Old `src/` and `scripts/` are legacy reference only.
 
 ```
-fVLM/
-├── src/                      # Core library (imports as modules)
-│   ├── model/
-│   │   ├── foveated_vlm.py   # Main model class (FoveatedVLM)
-│   │   ├── encoder.py        # Vision encoder (FoveatedEncoder)
-│   │   └── prediction.py     # Prediction head (FiLM-conditioned)
-│   ├── data/
-│   │   ├── dataset.py        # WebVid dataset
-│   │   ├── streaming_dataset.py
-│   │   └── sampling.py       # Frame sampling utilities
-│   └── training/
-│       └── visualization.py  # Attention & prediction viz
-│
-├── scripts/                  # Runnable scripts
-│   ├── train_multitask.py    # MAIN: Multi-task training (reconstruction + caption)
-│   ├── train_phase1.py       # Phase 1: Reconstruction only
-│   ├── train_phase2.py       # Phase 2: Text-conditioned
-│   ├── test_captioning.py    # Evaluate captioning
-│   ├── visualize_attention.py
-│   ├── analyze_results.py
-│   ├── setup/                # Data & model setup
-│   │   ├── download_models.py
-│   │   ├── download_webvid.py
-│   │   └── precompute_latents.py
-│   └── archive/              # Old/experimental (don't use)
-│
-├── configs/                  # Training configs (YAML)
-├── core_docs/                # AUTHORITATIVE design docs
-├── docs/                     # Analysis, handoff, experiments
-├── outputs/                  # Training outputs (gitignored)
-├── logs/                     # Log files (gitignored)
-└── data/                     # Data files (gitignored)
+release/
+├── train.py                    # torchrun --nproc_per_node=2 release/train.py --config ...
+├── evaluate.py                 # python release/evaluate.py --checkpoint ... --mode coarse_fine
+├── model/
+│   ├── foveated_vlm.py         # FoveatedVLM: 3 forward modes, text CE loss only
+│   └── encoder.py              # FoveatedEncoder: deep query on DINOv2, all bugs pre-fixed
+├── data/
+│   ├── webdataset_loader.py    # Tar shard loader, variable frames (1-64)
+│   ├── collate.py              # Pads frames + text, creates masks
+│   └── text_interleave.py      # 14% SmolTalk text retention mixing
+├── utils/
+│   ├── distributed.py          # DDP setup, rank helpers, reduce_mean
+│   ├── checkpoint.py           # Save/load with best-metric tracking
+│   ├── lr_schedule.py          # Cosine with linear warmup
+│   └── logging_utils.py        # wandb + CSV + stdout
+├── eval/
+│   └── metrics.py              # CIDEr, BLEU, METEOR, VQA accuracy
+├── configs/
+│   ├── stage1_webvid.yaml      # Stage 1: WebVid captioning
+│   ├── stage2_vl_sft.yaml      # Stage 2: VL SFT (Cauldron)
+│   ├── stage3_video_sft.yaml   # Stage 3: Video SFT
+│   ├── ablations/              # A1-A7, LR1-LR4
+│   └── scaling/                # Scaling grid configs
+└── scripts/
+    ├── precompute.py           # Data preprocessing (tokenize + shard)
+    ├── validate_shards.py      # Data integrity checks
+    └── create_shard_manifest.py # Shard metadata for bucketed batching
 ```
 
-**Key Entry Points:**
-- Training: `python scripts/train_multitask.py --config configs/train_webvid.yaml`
-- Evaluate: `python scripts/test_captioning.py`
-- Setup: `python scripts/setup/download_models.py`
-
----
-
-## Project Scope
-
-### What We're Building
-A novel vision-language model that:
-- Processes video frame-by-frame with ONE token per frame (not 196+ patches)
-- LLM controls WHERE to look in each frame (biological foveated attention)
-- Two-pass parallel training: static query planning → dynamic query execution
-- Training objective: next-frame VAE latent prediction
-
-### Core Hypothesis
-**Success metric:** `loss_fine < loss_coarse`
-- Pass 2 (dynamic queries) should outperform Pass 1 (static query)
-- This validates that foveated attention extracts better information
-
-### CRITICAL: Autoregressive Fine vs Static Coarse (THE THESIS)
-
-**This is the fundamental difference that justifies the architecture:**
-
-**Coarse (Static) Path:**
-```
-Frame 1 → q_static → z°_1
-Frame 2 → q_static → z°_2    (same query, no temporal dependence)
-Frame 3 → q_static → z°_3
-...
-```
-- Uses the SAME static query `q_static` for ALL frames
-- No information flows between frames during feature extraction
-- Each frame is processed independently
-
-**Fine (Autoregressive) Path:**
-```
-Frame 1 → q_init → z_1 → LLM → q_1
-Frame 2 → q_1    → z_2 → LLM → q_2    (query depends on previous FINE features!)
-Frame 3 → q_2    → z_3 → LLM → q_3
-...
-```
-- Query for frame t depends on LLM processing fine features z_1...z_{t-1}
-- Each query is INFORMED by what was seen in previous frames
-- This is the "foveated" behavior - looking at frame t based on understanding of frames 0..t-1
-
-**⚠️ CRITICAL: Training vs Inference Mismatch**
-
-The diagram above shows TRUE INFERENCE behavior. However, TRAINING uses a parallel approximation:
-
-**Training (current `forward_captioning` with `use_fine=True`):**
-```
-1. Coarse pass: q_static → ALL frames (parallel) → z_coarse
-2. z_coarse → LLM → ALL queries at once (parallel)
-3. Fine pass: shifted queries → ALL frames (parallel) → z_fine
-4. z_fine + caption → LLM → loss
-```
-
-**TRUE Inference (no coarse pass at all):**
-```
-1. q_init → Frame 1 → z_1 → LLM → q_1
-2. q_1 → Frame 2 → z_2 → LLM → q_2
-... purely sequential, queries come from FINE features
-```
-
-**Key Difference:**
-- **Training:** Queries derived from COARSE features (z_coarse)
-- **Inference:** Queries derived from PREVIOUS FINE features (z_{t-1})
-
-This means evaluation loss with `use_fine=True` measures the training approximation, NOT true inference performance. Multi-fine training (coarse→fine₁→fine₂) partially bridges this gap.
-
-**Why This Matters:**
-- The fine path can learn to track objects, follow motion, anticipate changes
-- The coarse path treats each frame as independent snapshots
-- For semantic tasks (captioning, QA), this temporal awareness is crucial
-
-### Model Stack (DO NOT DEVIATE)
-- **Vision Encoder:** DINOv3 ViT-S/16 (384-dim, trainable)
-- **Core LLM:** SmolLM2-135M-Instruct (576-dim hidden)
-- **Reconstruction Target:** Stable Diffusion VAE (frozen)
-- **Dataset:** LLaVA-Video-178K (0-30s academic subset)
-
----
-
-## CRITICAL: GPU Efficiency & Memory Management
-
-### Hardware Constraints
-- **GPU:** Single RTX 4090 (24GB VRAM, ~20GB usable)
-- **Failure mode:** VRAM overflow stops everything - must avoid at all costs
-
-### Proactive Memory Management Strategy
-
-**1. Conservative Configuration (Start Here)**
-```python
-batch_size = 2          # Never start higher
-grad_accum = 4          # Effective batch = 8
-num_frames = 8          # Can reduce to 4 if needed
-dtype = bfloat16        # Always use mixed precision
-```
-
-**2. Before Full Training**
-- Run memory profiler on single batch (see Appendix A in execution guide)
-- Verify peak memory < 18GB (leaves 2GB headroom)
-- Test gradient accumulation loop without OOM
-
-**3. During Training - Active Monitoring**
-- Log `torch.cuda.max_memory_allocated()` every 100 steps
-- Set up alerts if memory > 18GB
-- Monitor GPU utilization (`nvidia-smi dmon -s mu`)
-- If utilization < 80%, something's inefficient - investigate
-
-**4. OOM Mitigation Hierarchy (Apply in Order)**
-```python
-# Level 1: Reduce batch size
-batch_size = 1, grad_accum = 8
-
-# Level 2: Reduce sequence length
-num_frames = 4  # Instead of 8
-
-# Level 3: Gradient checkpointing
-llm.gradient_checkpointing_enable()
-
-# Level 4: More aggressive settings
-max_text_tokens = 32  # Truncate text context
-```
-
-**5. Efficiency Checks**
-- ✓ VAE latents precomputed (not computed during training)
-- ✓ DINO KV caching implemented correctly
-- ✓ No unnecessary `.cpu()` / `.cuda()` transfers in training loop
-- ✓ DataLoader num_workers set appropriately (2-4)
-- ✓ Pin memory enabled in DataLoader
-
-**6. Red Flags - Stop Immediately If:**
-- Memory usage creeping up over time (memory leak)
-- Training slower than expected (check GPU utilization)
-- Frequent OOM crashes (batch size too high)
-- Loss becomes NaN (gradient explosion)
-
----
-
-## Implementation Milestones
-
-### Phase 1: Setup (Milestone 1)
-- [ ] Project structure created
-- [ ] Download pretrained models (DINOv3, SmolLM2, SD-VAE)
-- [ ] Download dataset (start with videos_1.tar.gz)
-- [ ] Implement frame sampling
-- [ ] Precompute VAE latents
-- [ ] DataLoader working, verify shapes
-
-**Checkpoint:** Can load batch with correct shapes, no errors
-
-### Phase 2: Model (Milestone 2)
-- [ ] FoveatedEncoder with query mechanism
-- [ ] Two-pass forward pass (Pass 1 + Pass 2)
-- [ ] PredictionHead (FiLM conditioning)
-- [ ] Loss computation (loss_fine + lambda_coarse * loss_coarse)
-- [ ] Single training step works, gradients flow
-
-**Checkpoint:** Single step runs, loss decreases, no NaN, memory < 18GB
-
-### Phase 3: Training (Milestone 3)
-- [ ] Full training loop with logging
-- [ ] Checkpoint saving/loading
-- [ ] Attention visualization code
-- [ ] Training runs stably for 1K steps
-- [ ] Verify loss_fine vs loss_coarse divergence
-
-**Checkpoint:** Stable training, attention patterns non-uniform
-
-### Phase 4: Analysis (Milestone 4)
-- [ ] Attention visualizations
-- [ ] Decode predictions to pixels
-- [ ] Loss analysis plots
-- [ ] Write technical report
-
----
-
-## Key Principles
-
-1. **Architecture Fidelity:** Follow proposal document exactly
-   - Query-guided attention via asymmetric masking
-   - Two-pass structure with shared prediction head
-   - Auxiliary loss on Pass 1
-
-2. **Memory First:** Always verify memory before scaling up
-   - Profile first, train second
-   - Conservative defaults, scale carefully
-
-3. **Gradient Flow:** Verify end-to-end differentiability
-   - Auxiliary loss provides short path to q_static
-   - Main loss flows: Pass 2 → Pass 1 → encoder
-
-4. **Training Stability:** Monitor for collapse modes
-   - Attention entropy (should be lower for dynamic vs static)
-   - Loss ratio (loss_coarse / loss_fine should be > 1.0)
-   - Gradient norms (should be stable)
-
-5. **Incremental Development:** Test each component independently
-   - DataLoader → Model forward → Single step → Full training
-   - Don't build everything then debug
-
----
-
-## Success Criteria
-
-**Primary:** `loss_fine < loss_coarse` consistently after warmup
-- 5-15% improvement = PoC successful
-- >15% improvement = very promising
-
-**Secondary:**
-- Attention patterns track moving objects (visualizations)
-- Training stable (no NaN, no divergence)
-- Predictions improve over training (qualitative assessment)
-
----
-
-## When in Doubt
-
-1. Check the proposal doc for architecture details
-2. Check the execution guide for implementation specifics
-3. Prioritize memory efficiency over speed
-4. Test small before scaling up
-5. Visualize attention early and often
-
----
-
-## Common Pitfalls to Avoid
-
-- ❌ Starting with large batch size without profiling
-- ❌ Skipping VAE latent precomputation
-- ❌ Not monitoring memory during training
-- ❌ Implementing architecture differently than proposal
-- ❌ Ignoring attention collapse (uniform attention)
-- ❌ Not logging loss_fine vs loss_coarse separately
-
----
-
-## Known Bugs & Fixes (Historical)
-
-### Bug 1: Query Initialization Too Small (Fixed 2026-01-04)
-
-**Symptom:** `loss_fine == loss_coarse` exactly (to 3 decimal places)
-
-**Root Cause:** Query vectors (`q_static`, `q_init`) were initialized with `std=0.02` instead of `std=1.0` as specified in the proposal (lines 529-531). This caused the linear projection's bias term to dominate the query embedding.
-
-**Evidence:**
-```python
-# With std=0.02:
-# - Embedding difference: 0.012 (nearly identical)
-# - Attention entropy: 5.548 (nearly uniform, max=5.549)
-# - Output correlation: 0.9998 (identical outputs)
-
-# With std=1.0 (fixed):
-# - Embedding difference: 0.75 (60x larger!)
-# - Attention entropy: 5.28 (selective)
-# - Output correlation: 0.52 (different features)
-```
-
-**Fix:** Change initialization in `src/model/foveated_vlm.py`:
-```python
-# WRONG (was):
-self.q_static = nn.Parameter(torch.randn(1, query_dim) * 0.02)
-
-# CORRECT (fixed):
-self.q_static = nn.Parameter(torch.randn(1, query_dim))  # std=1.0
+**Key commands:**
+```bash
+# Training
+torchrun --nproc_per_node=2 release/train.py --config release/configs/stage1_webvid.yaml
+
+# Dry run (verify shapes, no training)
+python release/train.py --config release/configs/stage1_webvid.yaml --dry-run
+
+# Evaluation (3 modes: coarse_only, coarse_fine, autoregressive)
+python release/evaluate.py --config release/configs/stage1_webvid.yaml \
+    --checkpoint /workspace/checkpoints/stage1/best.pt --mode coarse_fine
+
+# Data preprocessing
+python release/scripts/precompute.py smoltalk --stage 1
+python release/scripts/precompute.py cauldron
+python release/scripts/precompute.py webvid --workers 4
 ```
 
 ---
 
-### Bug 2: Query Projection Bias Dominates (Fixed 2026-01-04)
+## Data Paths
 
-**Symptom:** Different queries produce nearly identical attention patterns
+| Dataset | Path | Purpose |
+|---------|------|---------|
+| WebVid shards | `/workspace/data/webvid/*.tar` | Stage 1 training |
+| Cauldron shards | `/workspace/data/cauldron/*.tar` | Stage 2 training |
+| Video SFT shards | `/workspace/data/stage3/*.tar` | Stage 3 training |
+| SmolTalk (stage N) | `/workspace/data/text_retention/stageN/*.tar` | 14% text retention |
+| Eval (10K frozen) | `/workspace/data/eval/val_10k/*.tar` | Validation |
+| Benchmarks | `/workspace/data/eval/benchmarks/` | Video-MME, MLVU, etc. |
 
-**Root Cause:** The `query_input_proj` linear layer had default bias initialization. With small queries, the bias term dominated the projected embedding, causing all queries to produce similar attention patterns.
+## Model Paths
 
-**Fix:** Remove bias from projection in `src/model/encoder.py`:
-```python
-# WRONG (was):
-self.query_input_proj = nn.Linear(query_dim, self.dino_dim)
-
-# CORRECT (fixed):
-self.query_input_proj = nn.Linear(query_dim, self.dino_dim, bias=False)
-```
+| Model | Path |
+|-------|------|
+| SmolLM2-135M-Instruct | `/workspace/models/SmolLM2-135M-Instruct` |
+| SmolLM2-360M-Instruct | `/workspace/models/SmolLM2-360M-Instruct` |
+| SmolLM2-1.7B-Instruct | `/workspace/models/SmolLM2-1.7B-Instruct` |
+| DINOv2-small | `/workspace/models/dinov2-small` |
+| DINOv2-base | `/workspace/models/dinov2-base` |
+| SmolVLM2-256M (eval) | `/workspace/models/SmolVLM2-256M-Video-Instruct` |
+| SmolVLM2-2.2B (eval) | `/workspace/models/SmolVLM2-2.2B-Instruct` |
 
 ---
 
-### Bug 3: Per-Sample Mode Selection (Fixed 2026-01-04)
+## Architecture Quick Reference
 
-**Symptom:** Losses increasing instead of decreasing during training
+**Core idea:** 1 token/frame via query-guided cross-attention on DINOv2 features.
 
-**Root Cause:** The training loop in `train_large_scale.py` was processing samples individually within a batch with different modes, which broke the model's batch processing. The model expects full batches, not single samples.
+**Two-pass training (parallel approximation):**
+1. Coarse: q_static → all frames → z_coarse → LLM → dynamic queries
+2. Fine: shifted queries → all frames → z_fine → LLM + text → loss
 
-**Fix:** Select mode per-batch (not per-sample):
-```python
-# WRONG (was): Process each sample in batch individually
-for i in range(B):
-    mode = modes[i].item()
-    f = frames[i:i+1]  # Single sample - BROKEN
-    ...
+**Three eval modes:**
+- `coarse_only` — fastest, single static-query pass
+- `coarse_fine` — matches training (two parallel passes)
+- `autoregressive` — true sequential inference with KV cache
 
-# CORRECT (fixed): Process entire batch with one mode
-mode = random.choices([0, 1, 2], weights=mode_weights)[0]
-if mode == 0:
-    text_embeds = model.get_empty_text_embeds(B)
-    loss, fine, coarse = model(text_embeds, frames, latents)
-...
-```
+**Train/inference gap < 0.6%** — parallel approximation is valid.
+
+---
+
+## Key Decisions (DO NOT CHANGE without discussion)
+
+### Loss Masking
+- **Stage 1 (WebVid captioning):** Loss on ALL text tokens (prompt + caption)
+- **Stage 2-3 (SFT):** Loss on ANSWER tokens only (mask user prompts)
+- **Visual tokens:** NEVER have loss (DINO features, not predicted text)
+- **SmolTalk retention:** Follows same loss rule as the stage it's in
+
+### Architecture Settings
+- `deep_query=True` (shallow = uniform attention — BUG-004)
+- `query_dim=384`, `bias=False` on query_input_proj (BUG-002)
+- `q_static`/`q_init` init with `std=1.0` (BUG-001)
+- Mode selection per-batch, not per-sample (BUG-003)
+
+### Training
+- No reconstruction loss, no VAE — text CE only
+- Full weight fine-tuning (no DoRA/LoRA)
+- Differential LR: connector (1e-4) > LLM (1e-5) > DINO (1e-5)
+- 14% SmolTalk in ALL stages
+- 1 FPS, variable frames 1-64, cap at 64 (matches SmolVLM2)
+- Frame size 224x224 (DINOv2 native, NOT 384 like SigLIP)
+
+### Prompt Format
+- Stage 1: `<|user|>What would be the WebVid caption for this video?<|end|><|assistant|>{caption}<|end|>`
+- Stage 2-3: Datasets have instruction format, use as-is
 
 ---
 
@@ -398,100 +150,30 @@ if mode == 0:
 
 When `loss_fine == loss_coarse` (or ratio stays at 1.0):
 
-1. **Check query initialization scale:**
-   ```python
-   print(model.q_static.std())  # Should be ~1.0, not 0.02
-   ```
+1. **Query init scale:** `model.q_static.std()` should be ~1.0
+2. **Attention entropy:** High (near log N) = uniform = BAD
+3. **Embedding difference:** `(embed_q1 - embed_q2).abs().mean()` should be > 0.5
+4. **Per-batch mode selection:** NOT per-sample
+5. **deep_query=True:** Shallow mode → uniform attention
 
-2. **Check attention entropy:**
-   ```python
-   # Low entropy = selective (good)
-   # High entropy (near log(N)) = uniform (bad)
-   ```
-
-3. **Check query embedding difference:**
-   ```python
-   embed1 = encoder.query_input_proj(q_static)
-   embed2 = encoder.query_input_proj(q_init)
-   print((embed1 - embed2).abs().mean())  # Should be > 0.5
-   ```
-
-4. **Verify per-batch (not per-sample) mode selection**
-
-5. **Check if DINO is being fine-tuned** (should be trainable)
-
-6. **Verify deep_query=True:**
-   ```python
-   print(model.encoder.deep_query)  # Should be True!
-   # Shallow mode produces uniform attention (output correlation ~0.98)
-   # Deep mode produces selective attention (output correlation ~0.43)
-   ```
+When loss is NaN or exploding:
+1. Check gradient norm (should be < 10 after clipping)
+2. Check learning rates (connector shouldn't be > 1e-3)
+3. Check visual_scale (should match LLM embedding std ~0.14)
 
 ---
 
-## Training Scripts
+## Critical References
 
-| Script | Purpose | Status |
-|--------|---------|--------|
-| `scripts/train_multitask.py` | Multi-task training (tested, works) | ✓ Stable |
-| `scripts/train_large_scale.py` | 24h streaming training | ✓ Fixed |
-| `scripts/train_phase1.py` | Phase 1 reconstruction only | Legacy |
-| `scripts/train_phase2.py` | Phase 2 text-conditioned | Legacy |
-
----
-
-## Code Organization Rules
-
-**FOLLOW THESE RULES to prevent codebase chaos:**
-
-### Script Naming Conventions
-
-| Prefix | Purpose | Example |
-|--------|---------|---------|
-| `train_*.py` | Full training scripts (checkpoints, logging) | `train_captioning_scaled.py` |
-| `experiment_*.py` | Quick experiments (testing hypotheses) | `experiment_sparse_frames.py` |
-| `evaluate_*.py` | Model evaluation | `evaluate_24h.py` |
-| `visualize_*.py` | Generate visualizations | `visualize_captioning.py` |
-| `diagnostic_*.py` | Debug/analysis scripts | `diagnostic_attention.py` |
-
-### Output Directory Conventions
-
-| Directory Pattern | Purpose |
-|-------------------|---------|
-| `outputs/{experiment_name}/` | Main experiment outputs |
-| `outputs/{experiment_name}/checkpoints/` | Model checkpoints |
-| `outputs/{experiment_name}/visualizations/` | Generated images/GIFs |
-| `outputs/{experiment_name}.log` | Training logs |
-
-### When Creating New Experiments
-
-1. **Create ONE script** per experiment (not multiple related scripts)
-2. **Use clear naming** that describes the hypothesis being tested
-3. **Add wandb logging** with project name `foveated-vlm-{experiment-type}`
-4. **Document in KNOWLEDGE.md** immediately after running:
-   - Hypothesis
-   - Configuration
-   - Results (ratio, loss)
-   - Conclusion (VALIDATED/FAILED)
-5. **Update Script Reference** table in KNOWLEDGE.md
-
-### What NOT to Do
-
-- ❌ Create multiple scripts that do similar things
-- ❌ Leave undocumented experiments in outputs/
-- ❌ Mix experiment code into training scripts
-- ❌ Create new output dirs without updating KNOWLEDGE.md
-- ❌ Run experiments without wandb (makes tracking impossible)
-
-### Documentation Requirements
-
-After EVERY experiment:
-1. Add entry to KNOWLEDGE.md Experiment History
-2. Update Script Reference table if new script
-3. Update Output Directory Guide if new outputs
-4. Commit with descriptive message: `feat: Add {experiment} - {one-line result}`
+| Document | Purpose |
+|----------|---------|
+| `core_docs/foveated_vlm_proposal.md` | Architecture specification |
+| `docs/KNOWLEDGE.md` | Bugs, fixes, experiments, insights |
+| `docs/SCALING_PLAN.md` | 3-stage training plan, scaling study |
+| `docs/runpod/BRIEFING.md` | Full project context for fresh invocations |
+| `docs/runpod/SMOLVLM2_REFERENCE.md` | SmolVLM2 training details |
+| `docs/RESEARCH_PLAYBOOK.md` | Research methodology |
 
 ---
 
-*Last updated: 2026-01-10*
-*For questions, refer to core_docs/ or consult with team*
+*Last updated: 2026-02-11*
