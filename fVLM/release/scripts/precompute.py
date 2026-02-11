@@ -529,6 +529,443 @@ def preprocess_webvid(output_dir: str, max_samples: int = 0, workers: int = 4):
 
 
 # --------------------------------------------------------------------------- #
+# LLaVA-Video preprocessing (Stage 3)
+# --------------------------------------------------------------------------- #
+
+def preprocess_llava_video(output_dir: str, max_samples: int = 0, workers: int = 4):
+    """
+    Download and preprocess LLaVA-Video-178K for Stage 3 video SFT.
+
+    The dataset contains video instruction pairs. We download the annotations
+    and attempt to fetch+process the referenced videos.
+    """
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor
+
+    print("[LLaVA-Video] Loading dataset...")
+    from datasets import load_dataset
+
+    # LLaVA-Video-178K has many configs organized by duration + source
+    configs = [
+        "0_30_s_academic_v0_1", "0_30_s_youtube_v0_1",
+        "0_30_s_activitynet", "0_30_s_perceptiontest", "0_30_s_nextqa",
+        "30_60_s_academic_v0_1", "30_60_s_youtube_v0_1",
+        "30_60_s_activitynet", "30_60_s_perceptiontest", "30_60_s_nextqa",
+        "1_2_m_youtube_v0_1", "1_2_m_academic_v0_1",
+        "1_2_m_activitynet", "1_2_m_nextqa",
+        "2_3_m_youtube_v0_1", "2_3_m_academic_v0_1",
+        "2_3_m_activitynet", "2_3_m_nextqa",
+        "llava_hound",
+    ]
+    # We'll iterate through configs, loading each as a separate dataset
+    ds = None  # Will load per-config below
+
+    tokenizer = get_tokenizer()
+    writer = ShardWriter(output_dir, samples_per_shard=1000)
+    total_target = max_samples if max_samples > 0 else 178_000
+    tmp_dir = Path("/workspace/tmp/llava_video_frames")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    count = 0
+    errors = 0
+    annotation_only = 0
+    t0 = time.time()
+
+    for config_name in configs:
+        if count >= total_target:
+            break
+
+        print(f"  [LLaVA-Video] Loading config: {config_name}...", flush=True)
+        # Each config has task-specific splits, not "train"
+        config_ds = None
+        for split_name in ["open_ended", "caption", "multi_choice"]:
+            try:
+                config_ds = load_dataset(
+                    "lmms-lab/LLaVA-Video-178K", config_name,
+                    split=split_name, streaming=True
+                )
+                print(f"    Loaded split: {split_name}", flush=True)
+                break
+            except Exception:
+                continue
+        if config_ds is None:
+            print(f"    Skipping {config_name}: no loadable split")
+            continue
+
+        for sample in config_ds:
+            if count >= total_target:
+                break
+
+            # Extract Q&A from conversation
+            conversations = sample.get("conversations", [])
+            video_url = sample.get("video", "") or sample.get("video_path", "")
+
+            user_text = ""
+            assistant_text = ""
+            for turn in conversations:
+                role = turn.get("from", turn.get("role", ""))
+                value = turn.get("value", turn.get("content", ""))
+                if role in ("human", "user"):
+                    # Strip <video> placeholder tag
+                    user_text = value.replace("<video>", "").replace("<image>", "").strip()
+                elif role in ("gpt", "assistant"):
+                    assistant_text = value
+
+            if not user_text or not assistant_text:
+                continue
+
+            # Tokenize (answer-only loss for Stage 3)
+            tok = tokenize_sft(user_text, assistant_text, stage=3, tokenizer=tokenizer)
+
+            meta = {
+                "token_ids": tok["token_ids"],
+                "loss_mask": tok["loss_mask"],
+                "source": f"llava_video/{config_name}",
+                "frame_count": 0,
+                "has_frames": False,
+            }
+
+            files = {"json": json.dumps(meta).encode("utf-8")}
+
+            # Try to download video frames if URL is available
+            if video_url and video_url.startswith("http"):
+                frame_data = _download_video_frames(video_url, count, tmp_dir)
+                if frame_data:
+                    files.update(frame_data)
+                    meta["frame_count"] = len(frame_data)
+                    meta["has_frames"] = True
+                    files["json"] = json.dumps(meta).encode("utf-8")
+                else:
+                    annotation_only += 1
+            else:
+                annotation_only += 1
+
+            sample_key = f"{count:08d}"
+            writer.write_sample(sample_key, files)
+            count += 1
+
+            if count % 5000 == 0:
+                elapsed = time.time() - t0
+                rate = count / max(elapsed, 1)
+                print(f"  [LLaVA-Video] {count}/{total_target}, {rate:.1f} samp/s, "
+                      f"{annotation_only} annotation-only, {errors} errors", flush=True)
+
+    writer.close()
+    elapsed = time.time() - t0
+    print(f"[LLaVA-Video] Done: {writer.total_written} samples ({annotation_only} annotation-only), "
+          f"{writer._shard_idx} shards, {elapsed:.0f}s")
+
+
+def _download_video_frames(url: str, idx: int, tmp_dir: Path) -> dict | None:
+    """Download a video and extract frames. Returns dict of frame bytes or None."""
+    import subprocess
+
+    video_path = tmp_dir / f"vid_{idx}.mp4"
+    frames_dir = tmp_dir / f"frames_{idx}"
+    frames_dir.mkdir(exist_ok=True)
+
+    try:
+        result = subprocess.run(
+            ["wget", "-q", "-O", str(video_path), "--timeout=15", url],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode != 0 or not video_path.exists() or video_path.stat().st_size < 1000:
+            return None
+
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(video_path),
+             "-vf", "fps=1,scale=224:224:force_original_aspect_ratio=increase,crop=224:224",
+             "-frames:v", "64", "-q:v", "2",
+             str(frames_dir / "frame_%03d.jpg")],
+            capture_output=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return None
+
+        frame_files = sorted(frames_dir.glob("frame_*.jpg"))
+        if not frame_files:
+            return None
+
+        frame_data = {}
+        for i, fp in enumerate(frame_files[:64]):
+            frame_data[f"{i:03d}.jpg"] = fp.read_bytes()
+        return frame_data
+
+    except Exception:
+        return None
+    finally:
+        video_path.unlink(missing_ok=True)
+        for f in frames_dir.glob("*"):
+            f.unlink(missing_ok=True)
+        if frames_dir.exists():
+            try:
+                frames_dir.rmdir()
+            except OSError:
+                pass
+
+
+def _save_llava_video_annotations(output_dir: str, max_samples: int):
+    """Fallback: save just the tokenized annotations without video frames."""
+    from datasets import load_dataset
+
+    print("[LLaVA-Video] Saving annotation-only shards...")
+
+    configs = [
+        "0_30_s_academic_v0_1", "0_30_s_youtube_v0_1",
+        "0_30_s_activitynet", "0_30_s_perceptiontest", "0_30_s_nextqa",
+        "30_60_s_academic_v0_1", "30_60_s_youtube_v0_1",
+        "30_60_s_activitynet", "30_60_s_perceptiontest", "30_60_s_nextqa",
+        "llava_hound",
+    ]
+
+    tokenizer = get_tokenizer()
+    writer = ShardWriter(output_dir, samples_per_shard=1000)
+    target = max_samples if max_samples > 0 else 178_000
+
+    count = 0
+    t0 = time.time()
+
+    for config_name in configs:
+        if count >= target:
+            break
+        print(f"  Loading config: {config_name}...", flush=True)
+        ds = None
+        for split_name in ["open_ended", "caption", "multi_choice"]:
+            try:
+                ds = load_dataset(
+                    "lmms-lab/LLaVA-Video-178K", config_name,
+                    split=split_name, streaming=True
+                )
+                break
+            except Exception:
+                continue
+        if ds is None:
+            print(f"    Skipping {config_name}: no loadable split")
+            continue
+
+        for sample in ds:
+            if count >= target:
+                break
+
+            conversations = sample.get("conversations", [])
+            user_text = ""
+            assistant_text = ""
+            for turn in conversations:
+                role = turn.get("from", turn.get("role", ""))
+                value = turn.get("value", turn.get("content", ""))
+                if role in ("human", "user"):
+                    user_text = value.replace("<video>", "").replace("<image>", "").strip()
+                elif role in ("gpt", "assistant"):
+                    assistant_text = value
+
+            if not user_text or not assistant_text:
+                continue
+
+            tok = tokenize_sft(user_text, assistant_text, stage=3, tokenizer=tokenizer)
+            meta = {
+                "token_ids": tok["token_ids"],
+                "loss_mask": tok["loss_mask"],
+                "source": f"llava_video/{config_name}",
+                "frame_count": 0,
+                "has_frames": False,
+            }
+
+            writer.write_sample(f"{count:08d}", {"json": json.dumps(meta).encode("utf-8")})
+            count += 1
+
+            if count % 10000 == 0:
+                print(f"  [LLaVA-Video] {count}/{target} annotations ({time.time()-t0:.0f}s)", flush=True)
+
+    writer.close()
+    print(f"[LLaVA-Video] Done: {writer.total_written} annotation shards, {time.time()-t0:.0f}s")
+
+
+# --------------------------------------------------------------------------- #
+# Evaluation set assembly
+# --------------------------------------------------------------------------- #
+
+def assemble_eval_set(output_dir: str):
+    """
+    Create a frozen 10K validation set from available data.
+
+    Composition:
+    - 3K from Cauldron (VQA, image)
+    - 3K from SmolTalk (text-only)
+    - 4K reserved for video (WebVid/LLaVA-Video — added when available)
+    """
+    import random
+    import webdataset as wds
+
+    random.seed(42)  # Reproducible split
+    print("[Eval] Assembling validation set...")
+
+    writer = ShardWriter(output_dir, samples_per_shard=1000)
+    count = 0
+    t0 = time.time()
+
+    # 1. Sample from Cauldron shards
+    cauldron_dir = Path("/workspace/data/cauldron")
+    if cauldron_dir.exists():
+        cauldron_shards = sorted(cauldron_dir.glob("*.tar"))
+        if cauldron_shards:
+            print(f"  [Eval] Sampling 3K from Cauldron ({len(cauldron_shards)} shards)...")
+            # Pick random shards and take samples from them
+            selected_shards = random.sample(cauldron_shards, min(5, len(cauldron_shards)))
+            cauldron_count = 0
+            for shard_path in selected_shards:
+                if cauldron_count >= 3000:
+                    break
+                try:
+                    with tarfile.open(str(shard_path), "r") as tf:
+                        members = tf.getmembers()
+                        # Group by sample key (everything before first .)
+                        samples = {}
+                        for m in members:
+                            key = m.name.split(".")[0]
+                            if key not in samples:
+                                samples[key] = {}
+                            ext = ".".join(m.name.split(".")[1:])
+                            samples[key][ext] = tf.extractfile(m).read()
+
+                        for key, files in samples.items():
+                            if cauldron_count >= 3000:
+                                break
+                            # Re-key for eval set
+                            new_key = f"eval_{count:08d}"
+                            # Add eval source tag to metadata
+                            if "json" in files:
+                                meta = json.loads(files["json"])
+                                meta["eval_source"] = "cauldron"
+                                files["json"] = json.dumps(meta).encode("utf-8")
+                            writer.write_sample(new_key, files)
+                            count += 1
+                            cauldron_count += 1
+                except Exception as e:
+                    print(f"    Error reading {shard_path}: {e}")
+                    continue
+            print(f"  [Eval] Got {cauldron_count} Cauldron samples")
+
+    # 2. Sample from SmolTalk Stage 2 shards (answer-only loss, representative of SFT)
+    smoltalk_dir = Path("/workspace/data/text_retention/stage2")
+    if smoltalk_dir.exists():
+        smoltalk_shards = sorted(smoltalk_dir.glob("*.tar"))
+        if smoltalk_shards:
+            print(f"  [Eval] Sampling 3K from SmolTalk ({len(smoltalk_shards)} shards)...")
+            selected_shards = random.sample(smoltalk_shards, min(5, len(smoltalk_shards)))
+            smoltalk_count = 0
+            for shard_path in selected_shards:
+                if smoltalk_count >= 3000:
+                    break
+                try:
+                    with tarfile.open(str(shard_path), "r") as tf:
+                        members = tf.getmembers()
+                        samples = {}
+                        for m in members:
+                            key = m.name.split(".")[0]
+                            if key not in samples:
+                                samples[key] = {}
+                            ext = ".".join(m.name.split(".")[1:])
+                            samples[key][ext] = tf.extractfile(m).read()
+
+                        for key, files in samples.items():
+                            if smoltalk_count >= 3000:
+                                break
+                            new_key = f"eval_{count:08d}"
+                            if "json" in files:
+                                meta = json.loads(files["json"])
+                                meta["eval_source"] = "smoltalk"
+                                files["json"] = json.dumps(meta).encode("utf-8")
+                            writer.write_sample(new_key, files)
+                            count += 1
+                            smoltalk_count += 1
+                except Exception as e:
+                    print(f"    Error reading {shard_path}: {e}")
+                    continue
+            print(f"  [Eval] Got {smoltalk_count} SmolTalk samples")
+
+    # 3. Sample from WebVid if available
+    webvid_dir = Path("/workspace/data/webvid")
+    webvid_shards = sorted(webvid_dir.glob("*.tar")) if webvid_dir.exists() else []
+    if webvid_shards:
+        print(f"  [Eval] Sampling up to 2K from WebVid ({len(webvid_shards)} shards)...")
+        selected_shards = random.sample(webvid_shards, min(3, len(webvid_shards)))
+        webvid_count = 0
+        for shard_path in selected_shards:
+            if webvid_count >= 2000:
+                break
+            try:
+                with tarfile.open(str(shard_path), "r") as tf:
+                    members = tf.getmembers()
+                    samples = {}
+                    for m in members:
+                        key = m.name.split(".")[0]
+                        if key not in samples:
+                            samples[key] = {}
+                        ext = ".".join(m.name.split(".")[1:])
+                        samples[key][ext] = tf.extractfile(m).read()
+
+                    for key, files in samples.items():
+                        if webvid_count >= 2000:
+                            break
+                        new_key = f"eval_{count:08d}"
+                        if "json" in files:
+                            meta = json.loads(files["json"])
+                            meta["eval_source"] = "webvid"
+                            files["json"] = json.dumps(meta).encode("utf-8")
+                        writer.write_sample(new_key, files)
+                        count += 1
+                        webvid_count += 1
+            except Exception as e:
+                print(f"    Error reading {shard_path}: {e}")
+                continue
+        print(f"  [Eval] Got {webvid_count} WebVid samples")
+
+    # 4. Sample from LLaVA-Video if available
+    stage3_dir = Path("/workspace/data/stage3")
+    stage3_shards = sorted(stage3_dir.glob("*.tar")) if stage3_dir.exists() else []
+    if stage3_shards:
+        print(f"  [Eval] Sampling up to 2K from Stage 3 ({len(stage3_shards)} shards)...")
+        selected_shards = random.sample(stage3_shards, min(3, len(stage3_shards)))
+        stage3_count = 0
+        for shard_path in selected_shards:
+            if stage3_count >= 2000:
+                break
+            try:
+                with tarfile.open(str(shard_path), "r") as tf:
+                    members = tf.getmembers()
+                    samples = {}
+                    for m in members:
+                        key = m.name.split(".")[0]
+                        if key not in samples:
+                            samples[key] = {}
+                        ext = ".".join(m.name.split(".")[1:])
+                        samples[key][ext] = tf.extractfile(m).read()
+
+                    for key, files in samples.items():
+                        if stage3_count >= 2000:
+                            break
+                        new_key = f"eval_{count:08d}"
+                        if "json" in files:
+                            meta = json.loads(files["json"])
+                            meta["eval_source"] = "stage3"
+                            files["json"] = json.dumps(meta).encode("utf-8")
+                        writer.write_sample(new_key, files)
+                        count += 1
+                        stage3_count += 1
+            except Exception as e:
+                print(f"    Error reading {shard_path}: {e}")
+                continue
+        print(f"  [Eval] Got {stage3_count} Stage 3 samples")
+
+    writer.close()
+    elapsed = time.time() - t0
+    print(f"[Eval] Done: {count} total eval samples, {writer._shard_idx} shards, {elapsed:.0f}s")
+    if count < 10000:
+        print(f"[Eval] Note: only {count}/10000 samples available now. "
+              f"Re-run after more data is processed to fill gaps.")
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -553,6 +990,16 @@ def main():
     p_wv.add_argument("--max-samples", type=int, default=0)
     p_wv.add_argument("--workers", type=int, default=4)
 
+    # LLaVA-Video
+    p_lv = sub.add_parser("llava-video", help="Preprocess LLaVA-Video-178K for Stage 3")
+    p_lv.add_argument("--output", default="/workspace/data/stage3")
+    p_lv.add_argument("--max-samples", type=int, default=0)
+    p_lv.add_argument("--workers", type=int, default=4)
+
+    # Eval set
+    p_ev = sub.add_parser("eval", help="Assemble 10K frozen validation set")
+    p_ev.add_argument("--output", default="/workspace/data/eval/val_10k")
+
     args = parser.parse_args()
 
     if args.command == "smoltalk":
@@ -564,6 +1011,12 @@ def main():
 
     elif args.command == "webvid":
         preprocess_webvid(args.output, args.max_samples, args.workers)
+
+    elif args.command == "llava-video":
+        preprocess_llava_video(args.output, args.max_samples, args.workers)
+
+    elif args.command == "eval":
+        assemble_eval_set(args.output)
 
     else:
         parser.print_help()

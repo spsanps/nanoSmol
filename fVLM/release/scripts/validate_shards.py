@@ -123,7 +123,13 @@ def validate_shard(tar_path: str, verbose: bool = False) -> dict:
         num_frames = len(image_files)
         result["frame_counts"].append(num_frames)
 
-        if num_frames == 0:
+        # Text-only or annotation-only samples don't need frames
+        is_text_only = meta.get("is_text_only", False)
+        has_frames = meta.get("has_frames", True)  # Default True for backward compat
+        if num_frames == 0 and (is_text_only or not has_frames):
+            result["valid_samples"] += 1
+            continue
+        elif num_frames == 0:
             result["errors"].append(f"{group_key}: no image files")
             continue
 

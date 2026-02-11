@@ -1,0 +1,75 @@
+# =============================================================================
+# Ablation A5: Frozen DINO (lr_dino = 0)
+# =============================================================================
+# Tests whether DINO fine-tuning is needed at all.
+#
+# Change from baseline:
+#   lr_dino: 1e-5 --> 0  (DINO weights completely frozen)
+#
+# DINO is pretrained with a strong self-supervised objective and already
+# produces excellent patch features. The foveated query mechanism sits ON TOP
+# of DINO features -- perhaps it can learn to attend to the right patches
+# without DINO having to change.
+#
+# If frozen DINO matches baseline, we save ~22M params of gradient computation
+# (~30% memory saving). If it hurts significantly, DINO adaptation to the
+# query pathway is important.
+#
+# This is stronger than LR2 (lr_dino=1e-6): completely zero gradients.
+#
+# Expected runtime: ~1.5h on 2xA100-80GB (faster -- no DINO backward pass)
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-135M-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false
+
+data:
+  train_shards: "/workspace/data/webvid/{00000..00359}.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 4
+
+training:
+  total_samples: 360_000
+  batch_size: 16
+  grad_accum: 2
+  lr_connector: 1.0e-4
+  lr_dino: 0.0               # <-- ABLATION: DINO completely frozen
+  lr_llm: 1.0e-5
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: cosine
+  dtype: bfloat16
+  compile: true
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/ablations/A5_frozen_dino
+  save_every_steps: 500
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 250
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-ablations
+  run_name: A5_frozen_dino

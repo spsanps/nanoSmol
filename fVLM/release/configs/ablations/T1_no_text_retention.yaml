@@ -1,22 +1,19 @@
 # =============================================================================
-# Stage 3: Video Supervised Fine-Tuning
+# Ablation T1: No Text Retention (text_ratio = 0)
 # =============================================================================
-# Final training stage -- specialises the model for video understanding
-# tasks using high-quality video instruction data.
+# Tests whether SmolTalk text interleaving is needed at all.
 #
-# Data mix:
-#   * LLaVA-Video-178K  -- general video QA and description
-#   * Vista-400K         -- temporal reasoning (before/after/during)
-#   * FineVideo          -- fine-grained narrative understanding
-# Plus 14% text-only retention from SmolTalk.
+# Change from baseline:
+#   text_ratio: 0.14 --> 0.0
 #
-# Answer-only loss (same as Stage 2).
-# Initialised from the best Stage 2 checkpoint.
+# Without text retention, the model trains purely on vision-language data.
+# Risk: catastrophic forgetting of instruction-following ability. The LLM
+# backbone may lose its ability to produce coherent text responses.
 #
-# Expected runtime: ~5h on 2xA100-80GB
+# Expected runtime: ~2h on 2xA100-80GB
 # =============================================================================
 
-stage: 3
+stage: 1
 
 model:
   llm: /workspace/models/SmolLM2-135M-Instruct
@@ -26,19 +23,18 @@ model:
   visual_scale: 0.14
   lambda_coarse: 0.0
   gradient_checkpointing: false
-  init_from: /workspace/checkpoints/stage2/best.pt
 
 data:
-  train_shards: "/workspace/data/stage3/{00000..00499}.tar"
+  train_shards: "/workspace/data/webvid/{00000..00359}.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
-  text_shards: "/workspace/data/text_retention/stage3/*.tar"
-  text_ratio: 0.14
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.0             # <-- ABLATION: no text retention
   max_frames: 64
   frame_size: 224
   num_workers: 4
 
 training:
-  total_samples: 500_000
+  total_samples: 360_000
   batch_size: 16
   grad_accum: 2
   lr_connector: 1.0e-4
@@ -53,10 +49,10 @@ training:
   seed: 42
 
 loss:
-  type: text_ce_answer_only  # Stage 3: loss on answer tokens only
+  type: text_ce_all
 
 checkpoint:
-  save_dir: /workspace/checkpoints/stage3
+  save_dir: /workspace/checkpoints/ablations/T1_no_text
   save_every_steps: 500
   keep_last: 2
   keep_best: 1
@@ -68,4 +64,5 @@ eval:
   max_samples: 1000
 
 wandb:
-  project: foveated-vlm-stage3
+  project: foveated-vlm-ablations
+  run_name: T1_no_text_retention
