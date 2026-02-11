@@ -20,7 +20,7 @@ Distilled from SmolVLM2 blog, SmolVLM paper (arXiv:2504.05299), Idefics3 paper (
 ### Stage 2: Video SFT
 - 3.3M samples from 10 datasets
 - Mix: 33% video, 34% image, 20% text, 12% multi-image
-- Frames at 1 FPS, up to 50 frames per video
+- Frames at 1 FPS, up to 64 frames per video (>64s videos: uniform spacing to still get 64 frames)
 - Loss: Text CE on answer tokens only (user prompts masked)
 
 ### No DPO/RLHF on the VLM

@@ -83,7 +83,7 @@ Read `docs/SCALING_PLAN.md` for the complete plan. Here's the executive summary:
 - **No SD-VAE / no reconstruction.** Text CE loss only. This is a VLM for understanding, not generation.
 - **No DoRA/LoRA.** Full weight fine-tuning. Our models (135M-1.7B) are small enough. Monitor for divergence; freeze DINO first if it happens.
 - **Model size TBD by scaling study.** Don't pre-commit to 1.7B. Run ablations at 135M, scaling grid at all 3 sizes, then decide.
-- **1 FPS, variable frame count.** 5s video = 5 frames, 30s = 30 frames, cap ~50.
+- **1 FPS, variable frame count.** 5s video = 5 frames, 30s = 30 frames, cap 64 (matches SmolVLM2). Pre-sort shards by duration for efficient bucketed batching.
 - **14% text data in ALL stages.** Preserves instruction-following. Removing it hurts 3.7-6.5%.
 - **WebVid captions are noisy.** Format as "What would be the WebVid caption for this video?" — don't pretend they're natural descriptions.
 

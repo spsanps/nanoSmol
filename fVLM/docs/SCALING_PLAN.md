@@ -155,12 +155,19 @@ Or minimal format:
 | Item | Spec |
 |------|------|
 | **Frame rate** | Fixed **1 FPS** (industry standard: SmolVLM2, LLaVA-Video, LLaVA-OneVision) |
-| **Variable frame count** | 5s video = 5 frames, 30s video = 30 frames, cap at ~50 |
+| **Variable frame count** | 5s video = 5 frames, 30s video = 30 frames, cap at **64** (matches SmolVLM2) |
 | **No fixed frame count** | Different videos get different numbers of frames |
-| **Batching** | Pad to max frames in batch + attention mask, OR best-fit packing |
+| **Fallback for long videos** | Videos >64s: uniform spacing (evenly spaced frames, still 64 max) |
+| **Batching** | Bucket by frame count (see efficiency note below) + attention mask |
 | **Resolution** | DINO input resolution (224×224 for ViT-S, 518×518 for ViT-L) |
 
-> SmolVLM2 uses 1 FPS up to 50 frames. LLaVA-Video found >100 frames needed for 30s+ dynamic content. Our foveated architecture may need fewer frames since queries can focus on what matters.
+> SmolVLM2 uses 1 FPS up to 64 frames, falling back to uniform spacing for longer videos. At 1 token/frame, 64 frames = 64 LLM tokens (vs 5,184 for standard VLM at 81 tok/frame).
+
+**Training efficiency from constant FPS + known cap:**
+- Frame count is deterministic from video duration: `min(duration_seconds, 64)`. Can pre-sort shards by duration at precompute time.
+- **Bucket by frame count** during training: group similar-length videos into batches. Reduces padding waste in DINO forward pass (frames processed as flat image batch — no padding needed if we flatten across samples).
+- LLM padding waste is negligible: worst case, padding 1-frame video to 64 = 63 extra tokens. Text portion (100-500 tokens) dominates sequence length regardless.
+- **Bounded compute per sample**: max 64 DINO forwards + 64 cross-attention ops + ~564 LLM tokens. No surprise OOMs from outlier videos.
 
 ### 3f. Data Plan
 
@@ -656,7 +663,7 @@ This goes into **E10** in the engineering prep list.
 | 5K samples on local 4090 | ~3.5M samples across 3 stages on 2-4xA100 |
 | **SD-VAE reconstruction loss** | **Text CE loss only** (understanding, not generation) |
 | **Pre-committed to 1.7B** | **Model size TBD by scaling law study** |
-| Fixed 8 or 16 frames per video | **1 FPS, variable frame count** (5-50 frames per video) |
+| Fixed 8 or 16 frames per video | **1 FPS, variable frame count** (1-64 frames per video, matches SmolVLM2) |
 | Single-stage training (reconstruction only) | 3-stage: connector pretrain → VL SFT (DoRA) → Video SFT (DoRA) |
 | "Free" instruct from backbone | **14% text retention in all stages** to preserve instruct capability |
 | Raw captions as training data | **Instruction-formatted** captions with varied prompts + system prompt |
