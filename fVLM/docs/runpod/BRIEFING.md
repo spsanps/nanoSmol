@@ -197,20 +197,132 @@ fVLM/
 
 ## Budget
 
-$500 total on RunPod. Estimated ~$256 for the full pipeline (2xA100 80GB). See `docs/SCALING_PLAN.md` Section 4 for detailed breakdown.
+$500 total on RunPod. Estimated ~$300-310 for the full pipeline. See `docs/SCALING_PLAN.md` Section 4 for detailed breakdown.
+
+| What | Cost |
+|------|------|
+| Network volume (500GB, ~1 month) | ~$35 |
+| CPU pod (~15h for data precompute) | ~$5-15 |
+| GPU pod (2xA100, ~185h for training) | ~$256 |
+| **Total** | **~$300-310** |
 
 Start with **2xA100 80GB**. Scale to 4x only if training is the bottleneck.
 
 ---
 
-## First Steps on RunPod
+## RunPod Infrastructure Setup
 
-1. Clone the repo, verify GPU access (`nvidia-smi`)
+### Step 1: Network Volume
+
+Create a **500GB network volume** on RunPod Secure Cloud.
+- Cost: $0.07/GB/month = ~$35/month
+- Pick a datacenter that has A100 80GB available (volume + pods must be same datacenter)
+- Volume persists independently of pods — data survives pod termination
+- Mounted at `/workspace` by default
+
+### Step 2: CPU Pod (Data Precompute)
+
+Spin up a **CPU-only pod**, attach the network volume. This does ALL data prep without paying for GPUs.
+
+**What WebVid-10M is:** The HuggingFace dataset (`TempoFunk/webvid-10M`) is **metadata only** — 10.7M rows of video URLs + captions (2.9GB). Actual videos are on Shutterstock CDN and must be downloaded via the URLs.
+
+**Pipeline (all CPU, ~10-15h with 16 workers):**
+
+```bash
+# 1. Install tools
+pip install video2dataset huggingface_hub datasets
+
+# 2. Download WebVid metadata from HuggingFace
+python -c "from datasets import load_dataset; ds = load_dataset('TempoFunk/webvid-10M')"
+
+# 3. Bulk download videos + extract frames at 1 FPS + resize + shard
+#    video2dataset handles the full pipeline: download → ffmpeg → resize → webdataset shards
+#    ~230 videos/sec on 16 cores
+video2dataset --url_list webvid_urls.parquet \
+    --output_folder /workspace/webvid_frames \
+    --output_format webdataset \
+    --input_format webvid \
+    --url_col contentUrl \
+    --caption_col name \
+    --frame_rate 1 \
+    --resize_mode center_crop \
+    --resize 224 \
+    --number_sample_per_shard 1000 \
+    --processes_count 16
+
+# 4. Tokenize captions (add SmolLM2 token IDs to shards)
+python scripts/setup/tokenize_captions.py --shards /workspace/webvid_frames
+
+# Output: /workspace/webvid_frames/
+#   ├── 00000.tar (1000 samples each: JPEG frames + captions + token_ids)
+#   ├── 00001.tar
+#   └── ... (~3000 shards for 3M samples)
+```
+
+**What gets precomputed (CPU) vs what stays in training loop (GPU):**
+
+| Precompute on CPU pod | Runs during GPU training |
+|-----------------------|--------------------------|
+| Video download from Shutterstock CDN | DINO forward pass (features change with fine-tuning) |
+| Frame extraction (ffmpeg, 1 FPS) | Query cross-attention |
+| Frame resize to 224×224 | LLM forward + backward |
+| Caption tokenization | Loss computation |
+| Tar sharding (webdataset format) | — |
+
+**Why NOT precompute DINO features:** Would be ~TBs of storage (3M videos × variable frames × 196 patches × 384 dim × 2 bytes). Also, DINO features change when we fine-tune the encoder in Stage 2+. Not worth it.
+
+**Output size:** ~50GB compressed (JPEG frames + tokenized captions). Fits easily in 500GB volume with room for checkpoints.
+
+**After precompute:** Terminate the CPU pod. Volume stays. Data stays.
+
+### Step 3: GPU Pod (Training)
+
+Spin up **2xA100 80GB**, attach the **same network volume**.
+
+```bash
+# Verify setup
+nvidia-smi                    # Should show 2x A100 80GB
+ls /workspace/webvid_frames/  # Should show precomputed shards
+```
+
+Data is already at `/workspace`. No download or preprocessing needed during training. GPU utilization should be >80% from the start.
+
+### Step 4: Also Download Stage 2-3 Datasets
+
+These are smaller and can be downloaded directly on the GPU pod (or precomputed on CPU pod if you want):
+
+| Dataset | Size | Source | For |
+|---------|------|--------|-----|
+| The Cauldron | ~50GB | HuggingFace (HuggingFaceM4/the_cauldron) | Stage 2: VL SFT |
+| LLaVA-Video-178K | ~30GB | HuggingFace | Stage 3: Video SFT |
+| Vista-400K | ~20GB | HuggingFace | Stage 3: Temporal reasoning |
+| FineVideo | ~10GB | HuggingFace | Stage 3: Narrative |
+| SmolTalk subset | ~2GB | HuggingFace (HuggingFaceTB/smoltalk) | 14% text retention |
+| RLAIF-V | ~1GB | HuggingFace (HuggingFaceH4/rlaif-v_formatted) | Optional DPO |
+
+These are instruction-formatted and don't need the video2dataset pipeline — they download directly via `huggingface_hub` or `datasets` library.
+
+---
+
+## First Steps When Invoked on RunPod
+
+**If on CPU pod (data precompute):**
+1. Read this file + `CLAUDE.md`
+2. Set up environment
+3. Run the CPU data prep pipeline above
+4. Verify shards: count, sample a few, check frame quality
+5. Done — terminate pod, tell user to spin up GPU pod
+
+**If on GPU pod (training):**
+1. Verify GPU access (`nvidia-smi`) and data at `/workspace`
 2. Read this file + `CLAUDE.md` + `docs/SCALING_PLAN.md`
-3. Set up environment (Python, PyTorch, dependencies)
-4. **Phase 0:** Build CPU data prep pipeline, single training script, eval harness
-5. **Phase 1:** Profile and optimize training throughput (target 2x improvement)
-6. Then proceed through phases 2-6 as planned
+3. Clone repo, set up environment (Python, PyTorch, transformers, wandb)
+4. **Phase 1:** Profile and optimize training throughput (target 2x improvement)
+5. **Phase 2:** Run ablations at SmolLM2-135M
+6. **Phase 3:** Scaling grid → determines final model size
+7. **Phase 4:** Train final model (3-stage pipeline)
+8. **Phase 5:** Evaluate (3 modes + benchmarks)
+9. **Phase 6:** Package and release to HuggingFace
 
 ---
 
