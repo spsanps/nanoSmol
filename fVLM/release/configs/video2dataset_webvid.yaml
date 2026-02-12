@@ -1,0 +1,30 @@
+subsampling:
+    ResolutionSubsampler:
+        args:
+            video_size: 224
+            resize_mode: "scale,crop,pad"
+    FrameSubsampler:
+        args:
+           frame_rate: 1
+
+reading:
+    yt_args:
+        download_size: 360
+        download_audio_rate: 44100
+        yt_metadata_args:
+            writesubtitles: False
+            writeautomaticsub: False
+            get_info: False
+    timeout: 30
+    sampler: null
+
+storage:
+    number_sample_per_shard: 1000
+    oom_shard_count: 5
+    captions_are_subtitles: False
+
+distribution:
+    processes_count: 6
+    thread_count: 32
+    subjob_size: 1000
+    distributor: "multiprocessing"
