@@ -496,6 +496,30 @@ vram_usage: ~9GB
 
 ---
 
+### Planned Experiment: Static Frame Replication for Image Data
+
+**Date:** 2026-02-12
+**Status:** PLANNED (pre-training ablation)
+
+**Hypothesis:** When training fVLM on image (single-frame) data, replicating the image across N frames ("still video") gives better training signal than feeding 1 frame.
+
+**Rationale:**
+- fVLM's core mechanism is temporal: the fine (autoregressive) pass generates queries informed by *previous* frames
+- With 1 frame, the fine pass has no temporal context — it degenerates to the coarse pass (same static query, same features)
+- With N repeated frames, the fine pass exercises the full temporal pipeline: frame 1 → query₁ → frame 2 (same image) → query₂ → ...
+- The model learns a "nothing changed, stabilize queries" baseline behavior for static content
+- Avoids distribution mismatch between image samples (1 frame) and video samples (5-64 frames) during training
+
+**Proposed values to test:** 1 frame vs 8 vs 16 repeated frames for image data (Cauldron)
+
+**Metric:** Convergence speed + final eval loss on both image QA and video QA benchmarks
+
+**Expected outcome:** 16 frames likely optimal — matches typical short video length, gives temporal pipeline enough signal without excessive compute waste. But needs empirical validation.
+
+**Compute cost:** Small ablation at 135M — run 3 configs on same Cauldron subset (~50K samples each), measure eval loss. ~2h on 2xA100.
+
+---
+
 ## Architecture Notes
 
 ### Two-Pass Structure
