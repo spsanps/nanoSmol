@@ -306,9 +306,20 @@ def create_webdataset(
     """
     effective_seed = seed + epoch
 
+    # Resolve shard_pattern: can be a string glob or a list of globs.
+    if isinstance(shard_pattern, list):
+        import glob as globmod
+        urls = []
+        for pat in shard_pattern:
+            urls.extend(sorted(globmod.glob(pat)))
+        if not urls:
+            raise ValueError(f"No shards found for patterns: {shard_pattern}")
+    else:
+        urls = shard_pattern
+
     # Build the pipeline.
     dataset = wds.WebDataset(
-        shard_pattern,
+        urls,
         nodesplitter=wds.split_by_worker,
         shardshuffle=shardshuffle if shuffle else False,
         seed=effective_seed if shuffle else None,

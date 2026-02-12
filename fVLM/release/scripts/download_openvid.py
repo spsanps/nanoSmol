@@ -34,8 +34,8 @@ HF_BASE = "https://huggingface.co/datasets/nkp37/OpenVid-1M/resolve/main"
 CSV_URL = f"{HF_BASE}/data/train/OpenVid-1M.csv"
 
 
-def download_file(url: str, dest: Path, desc: str = "") -> bool:
-    """Download a file with wget, return True on success."""
+def download_file_wget(url: str, dest: Path, desc: str = "") -> bool:
+    """Download a file with wget (fallback), return True on success."""
     try:
         result = subprocess.run(
             ["wget", "-q", "-c", "-O", str(dest), url],
@@ -48,6 +48,40 @@ def download_file(url: str, dest: Path, desc: str = "") -> bool:
         return False
 
 
+def download_hf_file(filename: str, download_dir: Path, desc: str = "") -> Path | None:
+    """Download a file from OpenVid-1M repo using hf_transfer (fast)."""
+    try:
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            "nkp37/OpenVid-1M",
+            filename,
+            repo_type="dataset",
+            local_dir=str(download_dir),
+        )
+        path = Path(path)
+        if path.exists() and path.stat().st_size > 1_000_000:
+            return path
+        return None
+    except Exception as e:
+        print(f"  HF download failed ({desc}): {e}", flush=True)
+        # Fallback to wget
+        dest = download_dir / filename
+        ok = download_file_wget(f"{HF_BASE}/{filename}", dest, desc)
+        return dest if ok else None
+
+
+def cleanup_hf_cache(download_dir: Path):
+    """Remove HF download cache to free disk space after processing."""
+    cache_dir = download_dir / ".cache"
+    if cache_dir.exists():
+        import shutil
+        try:
+            shutil.rmtree(cache_dir)
+        except Exception:
+            pass
+
+
 def download_zip_part(part_num: int, download_dir: Path) -> Path | None:
     """Download a single zip part, handling split files."""
     zip_path = download_dir / f"OpenVid_part{part_num}.zip"
@@ -56,22 +90,19 @@ def download_zip_part(part_num: int, download_dir: Path) -> Path | None:
         return zip_path
 
     if part_num in SPLIT_PARTS:
-        part_a = download_dir / f"OpenVid_part{part_num}_partaa"
-        part_b = download_dir / f"OpenVid_part{part_num}_partab"
-
-        ok_a = download_file(
-            f"{HF_BASE}/OpenVid_part{part_num}_partaa", part_a, f"part{part_num}aa"
+        part_a_path = download_hf_file(
+            f"OpenVid_part{part_num}_partaa", download_dir, f"part{part_num}aa"
         )
-        ok_b = download_file(
-            f"{HF_BASE}/OpenVid_part{part_num}_partab", part_b, f"part{part_num}ab"
+        part_b_path = download_hf_file(
+            f"OpenVid_part{part_num}_partab", download_dir, f"part{part_num}ab"
         )
 
-        if not ok_a:
+        if not part_a_path:
             return None
 
         with open(zip_path, "wb") as out:
-            for p in [part_a, part_b]:
-                if p.exists():
+            for p in [part_a_path, part_b_path]:
+                if p and p.exists():
                     with open(p, "rb") as f:
                         while True:
                             chunk = f.read(64 * 1024 * 1024)
@@ -82,10 +113,15 @@ def download_zip_part(part_num: int, download_dir: Path) -> Path | None:
 
         return zip_path if zip_path.stat().st_size > 1_000_000 else None
     else:
-        ok = download_file(
-            f"{HF_BASE}/OpenVid_part{part_num}.zip", zip_path, f"part{part_num}"
+        result = download_hf_file(
+            f"OpenVid_part{part_num}.zip", download_dir, f"part{part_num}"
         )
-        return zip_path if ok else None
+        if result:
+            # hf_hub_download may place file at a different path, move to expected location
+            if result != zip_path and result.exists():
+                result.rename(zip_path)
+            return zip_path if zip_path.exists() and zip_path.stat().st_size > 1_000_000 else None
+        return None
 
 
 def extract_frames_ffmpeg(
@@ -359,7 +395,7 @@ def main():
     csv_path = Path(args.csv) if args.csv else output_dir / "OpenVid-1M.csv"
     if not csv_path.exists():
         print("[OpenVid] Downloading captions CSV...", flush=True)
-        ok = download_file(CSV_URL, csv_path, "CSV")
+        ok = download_file_wget(CSV_URL, csv_path, "CSV")
         if not ok:
             print("FATAL: Could not download OpenVid-1M.csv", flush=True)
             sys.exit(1)
@@ -372,7 +408,7 @@ def main():
             flush=True,
         )
         csv_path.unlink()
-        ok = download_file(CSV_URL, csv_path, "CSV retry")
+        ok = download_file_wget(CSV_URL, csv_path, "CSV retry")
         if not ok:
             print("FATAL: Could not download OpenVid-1M.csv", flush=True)
             sys.exit(1)
@@ -410,46 +446,21 @@ def main():
 
     writer = ShardWriter(str(output_dir), samples_per_shard=1000, start_shard=start_shard)
 
-    # Step 3: Setup parallel download pipeline
-    parts_q = queue.Queue()
-    ready_q = queue.Queue()
-
-    for p in remaining_parts:
-        parts_q.put(p)
-
-    # Start download workers
-    dl_threads = []
-    for i in range(min(args.dl_workers, len(remaining_parts))):
-        t = threading.Thread(
-            target=download_worker,
-            args=(parts_q, ready_q, download_dir),
-            daemon=True,
-        )
-        t.start()
-        dl_threads.append(t)
-
-    # Step 4: Process parts as they arrive
+    # Step 3: Serial download→process loop (1 part at a time to control disk)
     total_clips = 0
     total_errors = 0
     parts_done = 0
     t0 = time.time()
 
-    for _ in range(len(remaining_parts)):
-        try:
-            part_num, zip_path = ready_q.get(timeout=7200)
-        except queue.Empty:
-            print("[OpenVid] Timed out waiting for downloads", flush=True)
-            break
-
+    for part_num in remaining_parts:
         elapsed = time.time() - t0
         parts_done += 1
 
         if total_clips > 0 and parts_done > 1:
             clips_per_part = total_clips / (parts_done - 1)
-            remaining = len(remaining_parts) - parts_done
-            # Time per part = elapsed / parts_done (includes download overlap)
-            time_per_part = elapsed / parts_done
-            eta_h = remaining * time_per_part / 3600
+            remaining_count = len(remaining_parts) - parts_done
+            time_per_part = elapsed / (parts_done - 1)
+            eta_h = remaining_count * time_per_part / 3600
             eta_str = f", ETA ~{eta_h:.1f}h"
         else:
             eta_str = ""
@@ -460,7 +471,17 @@ def main():
             flush=True,
         )
 
-        if zip_path is None:
+        # Download this part
+        print(f"  [DL] Starting download of part {part_num}...", flush=True)
+        dl_t0 = time.time()
+        zip_path = download_zip_part(part_num, download_dir)
+        dl_elapsed = time.time() - dl_t0
+
+        if zip_path and zip_path.exists():
+            size_gb = zip_path.stat().st_size / (1024**3)
+            speed = size_gb / max(dl_elapsed, 1) * 1024
+            print(f"  [DL] Part {part_num}: {size_gb:.1f}GB in {dl_elapsed:.0f}s ({speed:.0f} MB/s)", flush=True)
+        else:
             print(f"  [Part {part_num}] Download FAILED, skipping", flush=True)
             total_errors += 1
             continue
@@ -473,8 +494,14 @@ def main():
         total_clips += clips
         total_errors += errors
 
-        # Delete zip immediately
+        # Delete zip and HF cache immediately to free disk
         zip_path.unlink(missing_ok=True)
+        cleanup_hf_cache(download_dir)
+
+        # Only mark as completed if we actually got clips (bad zips return 0,0)
+        if clips == 0 and errors == 0:
+            print(f"  [Part {part_num}] Bad zip or no data, NOT marking as completed", flush=True)
+            continue
 
         # Save progress
         completed_parts.add(part_num)
@@ -486,18 +513,13 @@ def main():
                 "next_shard": writer._shard_idx,
             }, f)
 
-        # Quick disk check
-        if parts_done % 10 == 0:
-            try:
-                stat = os.statvfs("/workspace")
-                free_gb = stat.f_bavail * stat.f_frsize / (1024**3)
-                print(f"  [Disk] {free_gb:.0f} GB free", flush=True)
-            except Exception:
-                pass
-
-    # Wait for download threads to finish
-    for t in dl_threads:
-        t.join(timeout=10)
+        # Disk check every part
+        try:
+            stat = os.statvfs("/workspace")
+            free_gb = stat.f_bavail * stat.f_frsize / (1024**3)
+            print(f"  [Disk] {free_gb:.0f} GB free", flush=True)
+        except Exception:
+            pass
 
     writer.close()
     elapsed = time.time() - t0
