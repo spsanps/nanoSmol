@@ -87,8 +87,20 @@ def build_model(cfg: dict, device: torch.device):
     return model.to(device)
 
 
+def _get_tokenizer(cfg: dict):
+    """Lazy-load the tokenizer for on-the-fly tokenization of raw captions."""
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(cfg["model"]["llm"])
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    return tok
+
+
 def build_train_loader(cfg: dict, epoch: int = 0):
     """Build the training dataloader (vision + optional text interleave)."""
+    stage = cfg.get("stage", 1)
+    tokenizer = _get_tokenizer(cfg)
+
     vision_loader = make_dataloader(
         shard_pattern=cfg["data"]["train_shards"],
         batch_size=cfg["training"]["batch_size"],
@@ -97,6 +109,8 @@ def build_train_loader(cfg: dict, epoch: int = 0):
         seed=cfg["training"].get("seed", 42),
         epoch=epoch,
         num_workers=cfg["data"].get("num_workers", 4),
+        tokenizer=tokenizer,
+        stage=stage,
     )
 
     text_ratio = cfg["data"].get("text_ratio", 0.0)
@@ -109,6 +123,8 @@ def build_train_loader(cfg: dict, epoch: int = 0):
             seed=cfg["training"].get("seed", 42),
             epoch=epoch,
             num_workers=max(1, cfg["data"].get("num_workers", 4) // 2),
+            tokenizer=tokenizer,
+            stage=stage,
         )
         return InterleavedDataLoader(
             vision_loader=vision_loader,
@@ -124,12 +140,16 @@ def build_val_loader(cfg: dict):
     val_shards = cfg["data"].get("val_shards")
     if not val_shards:
         return None
+    stage = cfg.get("stage", 1)
+    tokenizer = _get_tokenizer(cfg)
     return make_dataloader(
         shard_pattern=val_shards,
         batch_size=cfg["training"]["batch_size"],
         max_frames=cfg["data"].get("max_frames", 64),
         shuffle=False,
         num_workers=max(1, cfg["data"].get("num_workers", 4) // 2),
+        tokenizer=tokenizer,
+        stage=stage,
     )
 
 

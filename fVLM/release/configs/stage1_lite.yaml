@@ -29,7 +29,7 @@ model:
   gradient_checkpointing: false
 
 data:
-  train_shards: "/workspace/data/cauldron/{00000..00099}.tar"
+  train_shards: "/workspace/data/cauldron_full/{00000..00099}.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
   text_shards: "/workspace/data/text_retention/stage1/*.tar"
   text_ratio: 0.14

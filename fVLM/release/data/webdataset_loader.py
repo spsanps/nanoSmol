@@ -340,6 +340,8 @@ def make_dataloader(
     collate_fn=None,
     pin_memory: bool = True,
     prefetch_factor: int = 2,
+    tokenizer=None,
+    stage: int = 1,
 ) -> torch.utils.data.DataLoader:
     """
     Convenience wrapper: creates the webdataset pipeline and wraps it in a
@@ -353,6 +355,8 @@ def make_dataloader(
 
     dataset = create_webdataset(
         shard_pattern=shard_pattern,
+        tokenizer=tokenizer,
+        stage=stage,
         max_frames=max_frames,
         shuffle=shuffle,
         seed=seed,

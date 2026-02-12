@@ -149,13 +149,15 @@ if [[ $START_STAGE -le 3 ]]; then
     log "=== Stage 3 Complete ==="
 fi
 
-# --- Evaluation ---
+# --- Evaluation (all 3 modes) ---
 log "=== Running Evaluation ==="
-python "$RELEASE_DIR/evaluate.py" \
-    --checkpoint /workspace/checkpoints/stage3/best.pt \
-    --eval-data /workspace/data/eval/val_10k/*.tar \
-    --mode all
+for MODE in coarse_only coarse_fine autoregressive; do
+    log "  Eval mode: $MODE"
+    python "$RELEASE_DIR/evaluate.py" \
+        --config "$RELEASE_DIR/configs/stage3_video_sft.yaml" \
+        --checkpoint /workspace/checkpoints/stage3/best.pt \
+        --mode "$MODE"
+done
 
 log "=== Pipeline Complete ==="
 log "Results saved to /workspace/checkpoints/"
-log "Run 'python release/eval/report.py' for the full report card."

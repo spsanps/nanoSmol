@@ -69,17 +69,24 @@ def validate_shard(tar_path: str, verbose: bool = False) -> dict:
     tf.close()
 
     # Re-group by sample key
+    import re
     sample_groups: dict[str, dict[str, bytes]] = {}
     for fullname, data in samples.items():
-        # Key is the part before extension
-        parts = fullname.rsplit(".", 1)
-        base = parts[0]
-        ext = parts[1] if len(parts) > 1 else ""
-
-        # For numbered frames like "00001_002.jpg", group by "00001"
-        import re
-        m = re.match(r"^(.+?)(?:_\d{3})?$", base)
-        group_key = m.group(1) if m else base
+        # Parse filename into (group_key, extension)
+        # Format A: key.NNN.ext (OpenVid: 00000000.000.jpg)
+        m = re.match(r"^(.+?)\.(\d{3})\.(jpg|jpeg|png)$", fullname)
+        if m:
+            group_key, ext = m.group(1), m.group(3)
+        else:
+            # Format B: key_NNN.ext (old WebVid: 00000001_003.jpg)
+            m = re.match(r"^(.+?)_(\d{3})\.(jpg|jpeg|png)$", fullname)
+            if m:
+                group_key, ext = m.group(1), m.group(3)
+            else:
+                # Format C: key.ext (simple: 00000001.json, 00000001.jpg)
+                parts = fullname.rsplit(".", 1)
+                group_key = parts[0] if len(parts) == 2 else fullname
+                ext = parts[1] if len(parts) == 2 else ""
 
         sample_groups.setdefault(group_key, {})[fullname] = (ext, data)
 
@@ -99,14 +106,17 @@ def validate_shard(tar_path: str, verbose: bool = False) -> dict:
             result["errors"].append(f"{group_key}: bad JSON: {e}")
             continue
 
-        # Check required keys
-        for key in ("token_ids", "loss_mask"):
-            if key not in meta:
-                result["errors"].append(f"{group_key}: missing '{key}' in JSON")
-                continue
+        # Check required keys: either pre-tokenized (token_ids+loss_mask),
+        # DPO format (chosen/rejected), or raw caption for on-the-fly tokenization
+        has_tokens = "token_ids" in meta and "loss_mask" in meta
+        has_dpo = "chosen_token_ids" in meta and "rejected_token_ids" in meta
+        has_caption = bool(meta.get("caption", ""))
+        if not has_tokens and not has_dpo and not has_caption:
+            result["errors"].append(f"{group_key}: missing token_ids, DPO tokens, and caption")
+            continue
 
-        token_ids = meta.get("token_ids", [])
-        loss_mask = meta.get("loss_mask", [])
+        token_ids = meta.get("token_ids", meta.get("chosen_token_ids", []))
+        loss_mask = meta.get("loss_mask", meta.get("chosen_loss_mask", []))
 
         if len(token_ids) != len(loss_mask):
             result["errors"].append(

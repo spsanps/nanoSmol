@@ -76,23 +76,17 @@ for s in stage1 stage2 stage3; do
     echo "    $s: $count shards"
 done
 
-echo "  Cauldron: $(ls /workspace/data/cauldron/*.tar 2>/dev/null | wc -l) shards"
-echo "  Stage 3:  $(ls /workspace/data/stage3/*.tar 2>/dev/null | wc -l) shards"
-echo "  WebVid:   $(ls /workspace/data/webvid/*.tar 2>/dev/null | wc -l) shards"
+echo "  Cauldron: $(ls /workspace/data/cauldron_full/*.tar 2>/dev/null | wc -l) shards"
+echo "  Stage 3:  $(ls /workspace/data/stage3_youtube/*.tar 2>/dev/null | wc -l) shards"
+echo "  OpenVid:  $(ls /workspace/data/openvid/*.tar 2>/dev/null | wc -l) shards"
 echo "  Eval:     $(ls /workspace/data/eval/val_10k/*.tar 2>/dev/null | wc -l) shards"
 
-# Step 4: Start WebVid download in background if needed
-WEBVID_SHARDS=$(ls /workspace/data/webvid/*.tar 2>/dev/null | wc -l)
-if [[ $WEBVID_SHARDS -lt 100 ]]; then
-    log "Step 4: Starting WebVid download in background..."
-    nohup python release/scripts/precompute.py webvid --max-samples 50000 --workers 6 \
-        > /workspace/logs/webvid_download.log 2>&1 &
-    WEBVID_PID=$!
-    log "  WebVid download PID: $WEBVID_PID"
-    log "  Monitor: tail -f /workspace/logs/webvid_download.log"
-    mkdir -p /workspace/logs
-else
-    log "Step 4: WebVid already has $WEBVID_SHARDS shards, skipping download"
+# Step 4: Check OpenVid data availability
+OPENVID_SHARDS=$(ls /workspace/data/openvid/*.tar 2>/dev/null | wc -l)
+log "Step 4: OpenVid has $OPENVID_SHARDS shards (Stage 1 video data)"
+if [[ $OPENVID_SHARDS -lt 50 ]]; then
+    warn "  Low shard count — Stage 1 may need more OpenVid data."
+    warn "  Consider resuming download: python release/scripts/download_openvid.py --resume"
 fi
 
 # Step 5: Dry run
@@ -110,7 +104,6 @@ from release.model.foveated_vlm import FoveatedVLM
 model = FoveatedVLM(
     llm_name=cfg['model']['llm'],
     dino_name=cfg['model']['dino'],
-    deep_query=cfg['model']['deep_query'],
     query_dim=cfg['model']['query_dim'],
 )
 total = sum(p.numel() for p in model.parameters())
@@ -126,15 +119,15 @@ log "=========================================="
 echo ""
 echo "Recommended training sequence:"
 echo ""
-echo "  # Option A: Start with Stage 1 Lite (fast, uses Cauldron images)"
+echo "  # Option A: Full Stage 1 with OpenVid video data"
+echo "  torchrun --nproc_per_node=$GPU_COUNT release/train.py --config release/configs/stage1_webvid.yaml"
+echo ""
+echo "  # Option B: Stage 1 Lite warmup (uses Cauldron images, 2h)"
 echo "  torchrun --nproc_per_node=$GPU_COUNT release/train.py --config release/configs/stage1_lite.yaml"
 echo ""
-echo "  # Option B: Run ablation grid first"
+echo "  # Option C: Run ablation grid"
 echo "  bash release/speedrun.sh --ablations"
 echo ""
-echo "  # Option C: Full pipeline (requires WebVid data)"
+echo "  # Option D: Full 3-stage pipeline"
 echo "  bash release/speedrun.sh"
-echo ""
-echo "  # Option D: Start from Stage 2 (skip Stage 1)"
-echo "  bash release/speedrun.sh --stage 2"
 echo ""

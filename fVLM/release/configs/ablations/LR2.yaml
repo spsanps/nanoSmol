@@ -31,7 +31,7 @@ model:
   gradient_checkpointing: false
 
 data:
-  train_shards: "/workspace/data/webvid/{00000..00359}.tar"
+  train_shards: "/workspace/data/openvid/*.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
   text_shards: "/workspace/data/text_retention/stage1/*.tar"
   text_ratio: 0.14

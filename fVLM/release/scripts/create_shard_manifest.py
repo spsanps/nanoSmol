@@ -57,8 +57,9 @@ def scan_shard(tar_path: str) -> dict:
                     pass
         elif ext in (".jpg", ".jpeg", ".png"):
             # Count frames per sample
-            # Multi-frame: "sample_001.jpg" -> base="sample_001", group="sample"
-            m = re.match(r"^(.+?)(?:_\d{3})$", base)
+            # Format A: "sample_001.jpg" -> group="sample"
+            # Format B: "sample.001.jpg" -> name="sample.001.jpg", base="sample.001"
+            m = re.match(r"^(.+?)(?:[._]\d{3})$", base)
             group = m.group(1) if m else base
             frame_counts[group] += 1
 

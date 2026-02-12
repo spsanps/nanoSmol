@@ -124,6 +124,12 @@ def main():
 
     model = load_model(cfg, args.checkpoint, device)
 
+    # Load tokenizer for on-the-fly tokenization of samples without pre-tokenized data
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(cfg["model"]["llm"])
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     shard_key = "val_shards" if args.split == "val" else "train_shards"
     loader = make_dataloader(
         shard_pattern=cfg["data"][shard_key],
@@ -131,6 +137,8 @@ def main():
         max_frames=cfg["data"].get("max_frames", 64),
         shuffle=False,
         num_workers=cfg["data"].get("num_workers", 4),
+        tokenizer=tokenizer,
+        stage=cfg.get("stage", 1),
     )
 
     dtype_str = cfg["training"].get("dtype", "float32")

@@ -27,7 +27,7 @@ model:
   init_from: /workspace/checkpoints/stage1/best.pt
 
 data:
-  train_shards: "/workspace/data/cauldron/{00000..00999}.tar"
+  train_shards: "/workspace/data/cauldron_full/*.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
   text_shards: "/workspace/data/text_retention/stage2/*.tar"
   text_ratio: 0.14
@@ -36,7 +36,7 @@ data:
   num_workers: 4
 
 training:
-  total_samples: 1_000_000
+  total_samples: 2_000_000  # 2001 shards × ~1K samples each
   batch_size: 16
   grad_accum: 2
   lr_connector: 1.0e-4
