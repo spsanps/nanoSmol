@@ -146,6 +146,14 @@ python release/scripts/precompute.py webvid --workers 4
 
 ---
 
+## Key Data Decisions (2026-02-12)
+
+- **WebVid-10M is dead.** All Shutterstock URLs return HTML error pages. Replaced with OpenVid-1M.
+- **Use SmolVLM2's actual training datasets** (LLaVA-Video-178K, FineVideo, Vript, M4-Instruct) for Stage 3 — apples-to-apples comparison.
+- **Static Frame Replication (Ablation A8):** Image data (Cauldron) should be replicated to N frames to create "still videos." Proposed: 16 frames. Rationale: exercises temporal pipeline, avoids train distribution mismatch between 1-frame images and 5-64 frame videos. Needs ablation: 1 vs 8 vs 16.
+
+---
+
 ## Debugging Checklist
 
 When `loss_fine == loss_coarse` (or ratio stays at 1.0):

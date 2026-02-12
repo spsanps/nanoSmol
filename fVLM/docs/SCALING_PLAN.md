@@ -173,11 +173,18 @@ Or minimal format:
 
 | Stage | Source | Samples | Notes |
 |-------|--------|---------|-------|
-| Stage 1 | WebVid-10M + 14% SmolTalk | ~2M | Video-caption pairs |
+| Stage 1 | OpenVid-1M + Cauldron (images as still video, see A8) + 14% SmolTalk | ~2M | Video-caption pairs + image VQA |
 | Stage 2 | The Cauldron subset + 14% text | ~1M | Instruction-formatted VQA |
-| Stage 3 | LLaVA-Video-178K + Vista-400K + FineVideo | ~0.5M | 33% video / 34% image / 20% text / 12% multi-image |
+| Stage 3 | LLaVA-Video-178K + FineVideo + Vript + M4-Instruct + 14% text | ~1M | 33% video / 34% image / 20% text / 12% multi-image |
 | DPO (opt.) | RLAIF-V | 83K | Preference pairs |
 | **Val set** | Fixed, never changes | 10K | Same across all stages |
+
+> **Data source update (2026-02-12):** WebVid-10M URLs are dead (Shutterstock killed all links). Replaced with:
+> - **OpenVid-1M** (1.45M videos, actual files on HuggingFace, 186 zip parts)
+> - **SmolVLM2's actual training datasets** for Stage 3: LLaVA-Video-178K, FineVideo, Vript, M4-Instruct (all have downloadable media on HuggingFace). See [SmolVLM2 reference](runpod/SMOLVLM2_REFERENCE.md) for full list.
+> - VideoStar, MovieChat, Vista-400K, ShareGPT4Video deprioritized (annotations-only, gated, or impractically large).
+>
+> **Static frame replication (A8):** Image data (Cauldron) will be replicated to N frames (TBD: 1/8/16) to create "still videos" that exercise the temporal pipeline. This is an ablation — see A8 in Section 6a.
 
 ### 3g. What to Precompute (CPU vs GPU)
 
@@ -295,6 +302,7 @@ One change at a time vs baseline (current best config).
 | A5 | Attention temperature | 1.0 / 0.5 / learnable | Sharper attention → bigger fine/coarse gap |
 | A6 | Prediction head capacity | 2-layer / 4-layer | More capacity in decoder |
 | A7 | Stage 1 backbone freezing | frozen / unfrozen (diff LR) | Is frozen connector bootstrap necessary at small scale? |
+| A8 | Static frame replication | 1 / 8 / 16 repeated frames for image data | Does replicating still images as multi-frame "videos" improve temporal pipeline training? (see KNOWLEDGE.md for full rationale) |
 
 ### 6b. Learning Rate Study
 
