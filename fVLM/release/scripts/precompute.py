@@ -294,64 +294,68 @@ def preprocess_cauldron(output_dir: str, max_samples: int = 0):
             if count >= total_target:
                 break
 
-            images = sample.get("images", [])
-            texts = sample.get("texts", [])
+            try:
+                images = sample.get("images", [])
+                texts = sample.get("texts", [])
 
-            if not images or not texts:
+                if not images or not texts:
+                    continue
+
+                # Extract Q&A from texts
+                user_text = ""
+                assistant_text = ""
+                for entry in texts:
+                    if entry.get("user"):
+                        user_text = entry["user"]
+                    if entry.get("assistant"):
+                        assistant_text = entry["assistant"]
+
+                if not user_text or not assistant_text:
+                    continue
+
+                # Process first image
+                img = images[0]
+                if not isinstance(img, Image.Image):
+                    continue
+
+                # Resize/crop to 224x224
+                img = img.convert("RGB")
+                w, h = img.size
+                size = min(w, h)
+                left = (w - size) // 2
+                top = (h - size) // 2
+                img = img.crop((left, top, left + size, top + size))
+                img = img.resize((224, 224), Image.LANCZOS)
+
+                # Save as JPEG bytes
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                img_bytes = buf.getvalue()
+
+                # Tokenize (answer-only loss for Stage 2)
+                tok = tokenize_sft(user_text, assistant_text, stage=2, tokenizer=tokenizer)
+
+                meta = {
+                    "token_ids": tok["token_ids"],
+                    "loss_mask": tok["loss_mask"],
+                    "source": f"cauldron/{subset}",
+                    "frame_count": 1,
+                }
+
+                sample_key = f"{count:08d}"
+                writer.write_sample(sample_key, {
+                    "json": json.dumps(meta).encode("utf-8"),
+                    "jpg": img_bytes,
+                })
+
+                count += 1
+                if count % 5000 == 0:
+                    elapsed = time.time() - t0
+                    rate = count / max(elapsed, 1)
+                    print(f"  [Cauldron] {count} samples ({rate:.0f} samp/s)", flush=True)
+            except (FileNotFoundError, OSError, Exception) as e:
+                # Some subsets reference missing local files; skip gracefully
                 continue
-
-            # Extract Q&A from texts
-            user_text = ""
-            assistant_text = ""
-            for entry in texts:
-                if entry.get("user"):
-                    user_text = entry["user"]
-                if entry.get("assistant"):
-                    assistant_text = entry["assistant"]
-
-            if not user_text or not assistant_text:
-                continue
-
-            # Process first image
-            img = images[0]
-            if not isinstance(img, Image.Image):
-                continue
-
-            # Resize/crop to 224x224
-            img = img.convert("RGB")
-            w, h = img.size
-            size = min(w, h)
-            left = (w - size) // 2
-            top = (h - size) // 2
-            img = img.crop((left, top, left + size, top + size))
-            img = img.resize((224, 224), Image.LANCZOS)
-
-            # Save as JPEG bytes
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85)
-            img_bytes = buf.getvalue()
-
-            # Tokenize (answer-only loss for Stage 2)
-            tok = tokenize_sft(user_text, assistant_text, stage=2, tokenizer=tokenizer)
-
-            meta = {
-                "token_ids": tok["token_ids"],
-                "loss_mask": tok["loss_mask"],
-                "source": f"cauldron/{subset}",
-                "frame_count": 1,
-            }
-
-            sample_key = f"{count:08d}"
-            writer.write_sample(sample_key, {
-                "json": json.dumps(meta).encode("utf-8"),
-                "jpg": img_bytes,
-            })
-
-            count += 1
-            if count % 5000 == 0:
-                elapsed = time.time() - t0
-                rate = count / max(elapsed, 1)
-                print(f"  [Cauldron] {count} samples ({rate:.0f} samp/s)", flush=True)
 
     writer.close()
     elapsed = time.time() - t0
