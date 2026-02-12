@@ -111,6 +111,7 @@ def build_train_loader(cfg: dict, epoch: int = 0):
         num_workers=cfg["data"].get("num_workers", 4),
         tokenizer=tokenizer,
         stage=stage,
+        replicate_image_frames=cfg["data"].get("replicate_image_frames", 1),
     )
 
     text_ratio = cfg["data"].get("text_ratio", 0.0)

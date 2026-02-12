@@ -109,7 +109,8 @@ def _decode_mp4_frames(mp4_bytes: bytes, max_frames: int = 64) -> list[torch.Ten
 
 
 def decode_sample(sample: dict, max_frames: int = 64,
-                  tokenizer=None, stage: int = 1) -> Optional[dict]:
+                  tokenizer=None, stage: int = 1,
+                  replicate_image_frames: int = 1) -> Optional[dict]:
     """
     Decode a single webdataset sample dict into training tensors.
 
@@ -212,6 +213,10 @@ def decode_sample(sample: dict, max_frames: int = 64,
     if len(frames) > max_frames:
         frames = frames[:max_frames]
 
+    # Replicate single-frame images to N frames (A8 ablation: static video)
+    if replicate_image_frames > 1 and len(frames) == 1:
+        frames = frames * replicate_image_frames
+
     num_frames = len(frames)
     frames_tensor = torch.stack(frames, dim=0)  # [T, 3, 224, 224]
 
@@ -234,11 +239,13 @@ def decode_sample(sample: dict, max_frames: int = 64,
     }
 
 
-def _sample_decoder(max_frames: int, tokenizer=None, stage: int = 1):
+def _sample_decoder(max_frames: int, tokenizer=None, stage: int = 1,
+                    replicate_image_frames: int = 1):
     """Return a map function for use in a webdataset pipeline."""
     def _decode(sample):
         result = decode_sample(sample, max_frames=max_frames,
-                               tokenizer=tokenizer, stage=stage)
+                               tokenizer=tokenizer, stage=stage,
+                               replicate_image_frames=replicate_image_frames)
         if result is None:
             return None
         return result
@@ -261,6 +268,7 @@ def create_webdataset(
     num_workers: int = 4,
     batch_size: Optional[int] = None,
     shardshuffle: int = 1000,
+    replicate_image_frames: int = 1,
 ) -> wds.WebDataset:
     """
     Create a webdataset pipeline that streams tar shards.
@@ -331,7 +339,8 @@ def create_webdataset(
 
     # Decode: we do NOT use wds.decode() because we need custom multi-frame
     # logic.  Instead we pass raw bytes and decode in _sample_decoder.
-    dataset = dataset.map(_sample_decoder(max_frames, tokenizer=tokenizer, stage=stage))
+    dataset = dataset.map(_sample_decoder(max_frames, tokenizer=tokenizer, stage=stage,
+                                          replicate_image_frames=replicate_image_frames))
     dataset = dataset.select(_is_valid)
 
     if batch_size is not None:
@@ -353,6 +362,7 @@ def make_dataloader(
     prefetch_factor: int = 2,
     tokenizer=None,
     stage: int = 1,
+    replicate_image_frames: int = 1,
 ) -> torch.utils.data.DataLoader:
     """
     Convenience wrapper: creates the webdataset pipeline and wraps it in a
@@ -373,6 +383,7 @@ def make_dataloader(
         seed=seed,
         epoch=epoch,
         num_workers=num_workers,
+        replicate_image_frames=replicate_image_frames,
     )
 
     loader = torch.utils.data.DataLoader(

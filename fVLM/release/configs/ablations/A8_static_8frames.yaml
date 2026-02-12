@@ -1,0 +1,74 @@
+# =============================================================================
+# Ablation A8: Static Frame Replication (8 frames)
+# =============================================================================
+# Tests whether replicating single-frame images to 8 identical frames improves
+# temporal pipeline training.
+#
+# When the dataloader encounters a single-frame image (e.g. Cauldron VQA),
+# it replicates the frame 8 times to create a static "video". This exercises
+# the full temporal pipeline (coarse + fine pass) on image data.
+#
+# Change from baseline:
+#   data.replicate_image_frames: 8  (baseline uses 1, i.e. no replication)
+#
+# Hypothesis: The fine pass learns from temporal differences between frames.
+# Replicated frames have zero temporal signal, but may still help the model
+# learn query diversity and frame-level selectivity.
+#
+# Expected runtime: ~2.5h on 2xA100-80GB (more tokens per image sample)
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-135M-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false
+
+data:
+  train_shards: "/workspace/data/openvid/*.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 4
+  replicate_image_frames: 8     # <-- ABLATION: replicate images to 8 frames
+
+training:
+  total_samples: 360_000
+  batch_size: 16
+  grad_accum: 2
+  lr_connector: 1.0e-4
+  lr_dino: 1.0e-5
+  lr_llm: 1.0e-5
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: cosine
+  dtype: bfloat16
+  compile: true
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/ablations/A8_static_8frames
+  save_every_steps: 500
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 250
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-ablations
+  run_name: A8_static_8frames
