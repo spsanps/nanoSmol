@@ -13,15 +13,16 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [⚠️ Methodology Limitations](#methodology-limitations)
-3. [Script Reference](#script-reference)
-4. [Experiment Roadmap](#experiment-roadmap)
-5. [Output Directory Guide](#output-directory-guide)
-6. [Critical Bugs & Fixes](#critical-bugs--fixes)
-7. [Training Insights](#training-insights)
-8. [Architecture Notes](#architecture-notes)
-9. [Performance Optimizations](#performance-optimizations)
-10. [Experiment History (Detailed)](#experiment-history)
+2. [Dataset Inventory](#dataset-inventory)
+3. [⚠️ Methodology Limitations](#methodology-limitations)
+4. [Script Reference](#script-reference)
+5. [Experiment Roadmap](#experiment-roadmap)
+6. [Output Directory Guide](#output-directory-guide)
+7. [Critical Bugs & Fixes](#critical-bugs--fixes)
+8. [Training Insights](#training-insights)
+9. [Architecture Notes](#architecture-notes)
+10. [Performance Optimizations](#performance-optimizations)
+11. [Experiment History (Detailed)](#experiment-history)
 
 ---
 
@@ -61,6 +62,170 @@ A novel vision-language model that processes video frame-by-frame with **ONE tok
 - Statistically significant: t=-6.679, p<0.0001
 - 1.06x more efficient (quality per FLOP)
 - Uses 16x fewer visual tokens (1 vs 16 per frame)
+
+---
+
+## Dataset Inventory
+
+*Last verified: 2026-02-13*
+
+All training data lives on RunPod at `/workspace/data/`. All shards are webdataset `.tar` files. All frames are 224x224 JPEG at 1 FPS, max 64 frames per clip.
+
+### Training Datasets
+
+#### Cauldron (Image VL SFT) — COMPLETE
+- **Path:** `/workspace/data/cauldron_full/`
+- **Source:** HuggingFace `HuggingFaceM4/the_cauldron` (37 subsets)
+- **Samples:** 2,000,485 | **Shards:** 2,001 | **Size:** 26GB
+- **Type:** Single-image VQA/captioning (1 frame each)
+- **Shard format:** `{id}.jpg` + `{id}.json`
+- **JSON fields:** `token_ids` (list[int]), `loss_mask` (list[int]), `source` (str, e.g. "cauldron/ai2d"), `frame_count` (int, always 1)
+- **Stage:** 2 (Vision SFT)
+- **Has manifest:** Yes
+
+#### OpenVid-1M (Video Captioning) — COMPLETE
+- **Path:** `/workspace/data/openvid/`
+- **Source:** HuggingFace `nkp37/OpenVid-1M` (186 zip parts, 160 processed, 26 missing/failed)
+- **Samples:** 431,963 | **Shards:** 905 | **Size:** 93GB
+- **Type:** Video clips, variable frames (1-64, avg ~7)
+- **Shard format:** `{id}.{frame_idx:03d}.jpg` + `{id}.json`
+- **JSON fields:** `caption` (str, raw), `frame_count` (int), `source` ("openvid"), `video_id` (str)
+- **Note:** Raw captions, NOT pre-tokenized. Tokenization happens at training time.
+- **Stage:** 1 (replaces dead WebVid-10M)
+- **Has manifest:** No (has `progress.json` with part tracking)
+
+#### LLaVA-Video-178K (Video SFT) — IN PROGRESS
+- **Path:** `/workspace/data/llava_video_shards/` (main) + `llava_video_shards_b/` (stream B)
+- **Source:** HuggingFace `lmms-lab/LLaVA-Video-178K` (multiple duration/source subsets)
+- **Samples:** ~110K+ | **Shards:** 131 + 6 = 137 | **Size:** 41GB + 3GB = 44GB
+- **Type:** Video QA/captioning, variable frames (1-64)
+- **Shard format:** `{shard}_{clip}.{frame_idx:03d}.jpg` + `{shard}_{clip}.json`
+- **JSON fields:** `caption` (str, raw), `frame_count` (int), `source` ("llava_video"), `video_id` (str)
+- **Subsets processed:** 0-30s academic, 0-30s youtube (~74K), 30-60s academic, 30-60s youtube (in progress), 1-2m academic (in progress), activitynetqa, nextqa, perceptiontest, 2-3m subsets
+- **Stage:** 3 (Video SFT)
+- **Has manifest:** In progress
+
+#### LLaVA YouTube Frames (Video SFT, pre-tokenized) — COMPLETE
+- **Path:** `/workspace/data/stage3_youtube/`
+- **Source:** LLaVA-Video-178K 0-30s YouTube subset (early processing, pre-tokenized)
+- **Samples:** 21,461 | **Shards:** 22 | **Size:** 4.0GB
+- **Type:** Video QA, variable frames, pre-tokenized
+- **Shard format:** `{id}.{frame_idx:03d}.jpg` + `{id}.json`
+- **JSON fields:** `token_ids`, `loss_mask`, `caption`, `frame_count`, `source`, `yt_id`, `has_frames`
+- **Stage:** 3
+- **Has manifest:** Yes
+
+#### WebVid (Valid Subset) — COMPLETE
+- **Path:** `/workspace/data/webvid/`
+- **Source:** WebVid-10M (only ~19K URLs still alive; bulk of dataset is dead)
+- **Samples:** 18,758 | **Shards:** 19 | **Size:** 4.5GB
+- **Type:** Video captioning, pre-tokenized
+- **Shard format:** `{id}.{frame_idx:03d}.jpg` + `{id}.json`
+- **JSON fields:** `token_ids`, `loss_mask`, `caption`, `frame_count`, `source` ("webvid")
+- **Stage:** 1
+- **Has manifest:** Yes
+
+#### Vript Short (Video Captioning) — COMPLETE
+- **Path:** `/workspace/data/vript_shards/`
+- **Source:** HuggingFace `Mutonix/Vript` (short scene clips)
+- **Samples:** 10,225 | **Shards:** 11 | **Size:** 659MB
+- **Type:** Video captioning, variable frames (1-64)
+- **Shard format:** `{shard}_{clip}.{frame_idx:03d}.jpg` + `{shard}_{clip}.json`
+- **JSON fields:** `caption` (str, raw), `frame_count` (int), `source` ("vript"), `video_id` (str)
+- **Stage:** 3
+- **Has manifest:** Yes
+
+#### RLAIF-V (Image Preference) — COMPLETE
+- **Path:** `/workspace/data/rlaif_v/`
+- **Source:** HuggingFace `openbmb/RLAIF-V-Dataset`
+- **Samples:** 83,132 | **Shards:** 84 | **Size:** 1.5GB
+- **Type:** Single-image with chosen/rejected pairs (for preference training)
+- **Shard format:** `{id}.jpg` + `{id}.json`
+- **JSON fields:** `chosen_token_ids`, `chosen_loss_mask`, `rejected_token_ids`, `rejected_loss_mask`, `source` ("rlaif_v"), `frame_count` (always 1)
+- **Stage:** Future (DPO/preference alignment)
+- **Has manifest:** Yes
+
+#### SmolTalk Text Retention — COMPLETE
+- **Path:** `/workspace/data/text_retention/stage{1,2,3}/`
+- **Source:** SmolLM2 SFT data (Smol-Magpie-Ultra, MetaMathQA, OpenHermes, etc.)
+- **Samples:** ~490K total | **Shards:** stage1=280, stage2=140, stage3=70 | **Size:** 1.9GB total
+- **Type:** Text-only (no images), pre-tokenized
+- **Shard format:** `{id}.json` (no images)
+- **JSON fields:** `token_ids`, `loss_mask`, `source` ("smoltalk"), `is_text_only` (always true)
+- **Purpose:** 14% text retention mixing in all stages (preserves instruction-following)
+- **Has manifest:** Per-stage
+
+#### Stage 3 Legacy (Pre-tokenized LLaVA-Video) — COMPLETE
+- **Path:** `/workspace/data/stage3/`
+- **Source:** LLaVA-Video-178K 0-30s academic (early processing, annotations only — no frames)
+- **Samples:** 50,000 | **Shards:** 50 | **Size:** 75MB
+- **Type:** Pre-tokenized text-only (has_frames=False)
+- **JSON fields:** `token_ids`, `loss_mask`, `source`, `frame_count` (0), `has_frames` (false)
+- **Note:** Annotations without frames. Superseded by `llava_video_shards/` which has actual frames.
+- **Has manifest:** Yes
+
+#### VISTA-400K (Temporal Reasoning) — JUST LAUNCHED
+- **Path:** `/workspace/data/vista_shards/` (empty, processing started)
+- **Source:** HuggingFace `weili-0234/VISTA-400k-frames` (pre-extracted JPEGs) + `TIGER-Lab/VISTA-400K` (annotations)
+- **Expected:** ~175-200K samples | **Size:** ~40-60GB estimated
+- **Type:** Multi-frame temporal reasoning (spatial NIAH, event relationships, long video captions)
+- **Stage:** 3
+- **Status:** Serial pipeline running — download tar.gz → extract → resize 224x224 → match annotations → pack shards → delete
+
+### Evaluation Datasets
+
+#### Val 10K (Held-out Validation) — COMPLETE
+- **Path:** `/workspace/data/eval/val_10k/`
+- **Samples:** 10,000 | **Shards:** 10 | **Size:** ~100MB
+- **Type:** Mixed sources (OpenVid, Cauldron, etc.)
+- **JSON fields:** `caption`, `frame_count`, `source`, `video_id`, `token_ids`, `loss_mask`, `eval_source`
+- **Purpose:** Frozen validation set for monitoring training loss curves
+
+#### Video-MME Benchmark — COMPLETE (raw)
+- **Path:** `/workspace/data/eval/benchmarks/video_mme/`
+- **Size:** 95GB (20 video zip archives + annotations + subtitles)
+- **Status:** Raw zips downloaded, frames NOT yet extracted to 224x224
+- **SmolVLM2 score:** 52.1
+
+#### MVBench Benchmark — COMPLETE (raw)
+- **Path:** `/workspace/data/eval/benchmarks/mvbench/`
+- **Size:** 17GB (11 video zips + 20 JSON annotations)
+- **Status:** Raw downloaded
+- **SmolVLM2 score:** 46.27
+
+#### MLVU Benchmark — ANNOTATIONS ONLY
+- **Path:** `/workspace/data/eval/benchmarks/mlvu/`
+- **Size:** 2.2MB (annotations only, 285GB videos deferred)
+- **SmolVLM2 score:** 55.2
+
+### Data Mix Summary (2026-02-13)
+
+| Type | Samples | % of Total | Target % |
+|------|---------|-----------|----------|
+| Video (OpenVid + LLaVA-Video + Vript + WebVid + VISTA) | ~770K+ | ~23% | **40-50%** |
+| Image (Cauldron + RLAIF-V) | ~2.08M | ~62% | ~30-35% |
+| Text (SmolTalk) | ~490K | ~15% | ~15-20% |
+| **Total** | **~3.34M+** | | |
+
+**Video gap:** Need ~600-700K more video clips to reach 40-50%. VISTA-400K (~175K usable) in progress. Remaining gap sources: more LLaVA-Video subsets (1-2m youtube, 3-10m), ShareGPT4Video, MovieChat, VideoStar.
+
+### Shard Format Conventions
+
+Two formats exist across datasets:
+
+**Format A — Pre-tokenized (ready for training):**
+```json
+{"token_ids": [1, 234, ...], "loss_mask": [0, 0, 1, 1, ...], "source": "...", "frame_count": N}
+```
+Used by: Cauldron, WebVid, SmolTalk, RLAIF-V, stage3_youtube, stage3, val_10k
+
+**Format B — Raw caption (tokenized at training time):**
+```json
+{"caption": "A dog runs...", "frame_count": N, "source": "...", "video_id": "..."}
+```
+Used by: OpenVid, LLaVA-Video shards, Vript shards, VISTA (expected)
+
+Both formats use `{id}.{frame_idx:03d}.jpg` for frame images (or `{id}.jpg` for single-image).
 
 ---
 

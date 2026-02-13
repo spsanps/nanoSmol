@@ -78,14 +78,21 @@ python release/scripts/precompute.py webvid --workers 4
 
 ## Data Paths
 
-| Dataset | Path | Purpose |
-|---------|------|---------|
-| WebVid shards | `/workspace/data/webvid/*.tar` | Stage 1 training |
-| Cauldron shards | `/workspace/data/cauldron/*.tar` | Stage 2 training |
-| Video SFT shards | `/workspace/data/stage3/*.tar` | Stage 3 training |
-| SmolTalk (stage N) | `/workspace/data/text_retention/stageN/*.tar` | 14% text retention |
-| Eval (10K frozen) | `/workspace/data/eval/val_10k/*.tar` | Validation |
-| Benchmarks | `/workspace/data/eval/benchmarks/` | Video-MME, MLVU, etc. |
+| Dataset | Path | Samples | Type | Stage |
+|---------|------|---------|------|-------|
+| OpenVid-1M | `/workspace/data/openvid/*.tar` | 432K | Video (raw caption) | 1 |
+| WebVid (valid) | `/workspace/data/webvid/*.tar` | 19K | Video (pre-tokenized) | 1 |
+| Cauldron | `/workspace/data/cauldron_full/*.tar` | 2.0M | Image (pre-tokenized) | 2 |
+| LLaVA-Video | `/workspace/data/llava_video_shards/*.tar` | ~110K+ | Video (raw caption) | 3 |
+| LLaVA YouTube | `/workspace/data/stage3_youtube/*.tar` | 21.5K | Video (pre-tokenized) | 3 |
+| Vript | `/workspace/data/vript_shards/*.tar` | 10.2K | Video (raw caption) | 3 |
+| VISTA-400K | `/workspace/data/vista_shards/*.tar` | ~175K (est) | Video (in progress) | 3 |
+| RLAIF-V | `/workspace/data/rlaif_v/*.tar` | 83K | Image (preference) | Future |
+| SmolTalk | `/workspace/data/text_retention/stageN/*.tar` | 490K | Text-only | All (14%) |
+| Val 10K | `/workspace/data/eval/val_10k/*.tar` | 10K | Mixed | Eval |
+| Benchmarks | `/workspace/data/eval/benchmarks/` | — | Video-MME, MVBench, MLVU | Eval |
+
+Full dataset documentation with shard formats: `docs/KNOWLEDGE.md` → Dataset Inventory
 
 ## Model Paths
 
