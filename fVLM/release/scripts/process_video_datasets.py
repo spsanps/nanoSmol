@@ -192,7 +192,8 @@ def process_vript(args):
     tmp_dir = Path("/workspace/tmp/vript_process")
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    writer = ShardWriter(str(output_dir), samples_per_shard=1000)
+    writer = ShardWriter(str(output_dir), samples_per_shard=1000,
+                         start_shard=getattr(args, 'start_shard', 0))
 
     # Process zip files
     zip_files = sorted(clips_dir.glob("*.zip"))
@@ -301,7 +302,8 @@ def process_llava_video(args):
 
     print(f"[LLaVA-Video] Loaded annotations for {len(annotations)} videos", flush=True)
 
-    writer = ShardWriter(str(output_dir), samples_per_shard=1000)
+    writer = ShardWriter(str(output_dir), samples_per_shard=1000,
+                         start_shard=getattr(args, 'start_shard', 0))
 
     # Process tar.gz files
     tar_files = sorted(llava_dir.glob("*.tar.gz"))
@@ -391,6 +393,7 @@ def main():
     parser.add_argument("--output", required=True, help="Output directory for shards")
     parser.add_argument("--workers", type=int, default=12, help="Parallel ffmpeg workers")
     parser.add_argument("--max-frames", type=int, default=64, help="Max frames per video")
+    parser.add_argument("--start-shard", type=int, default=0, help="Starting shard index (for appending)")
     args = parser.parse_args()
 
     if args.dataset == "vript":
