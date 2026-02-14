@@ -70,7 +70,8 @@ def process_single_video(args: tuple) -> dict | None:
             return None
 
         meta = {
-            "caption": caption,
+            "user": "",
+            "assistant": caption,
             "frame_count": len(frame_data),
             "source": source_name,
             "video_id": video_id,
