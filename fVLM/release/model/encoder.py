@@ -162,6 +162,7 @@ class FoveatedEncoder(nn.Module):
         self,
         query: torch.Tensor,
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]],
+        return_attention: bool = False,
     ) -> torch.Tensor:
         """
         Propagate a query token through every DINO layer using cached K/V.
@@ -181,6 +182,8 @@ class FoveatedEncoder(nn.Module):
 
         # Project query into DINO space.
         q_hidden = self.query_input_proj(query).unsqueeze(1)  # [B, 1, D]
+
+        all_attn_weights = [] if return_attention else None
 
         # Walk every layer, reusing cached K/V from patches.
         for layer_idx, layer in enumerate(self.dino.encoder.layer):
@@ -203,6 +206,10 @@ class FoveatedEncoder(nn.Module):
             # Q: [B, H, 1, d],  K_h: [B, H, N+1, d],  V_h: [B, H, N+1, d]
             attn_scores = torch.matmul(Q, K_h.transpose(-2, -1)) * self.attn_scale
             attn_weights = F.softmax(attn_scores, dim=-1)  # [B, H, 1, N+1]
+
+            if return_attention:
+                all_attn_weights.append(attn_weights.detach())
+
             attn_out = torch.matmul(attn_weights, V_h)     # [B, H, 1, d]
 
             # Merge heads:  [B, H, 1, d] -> [B, 1, D]
@@ -226,6 +233,9 @@ class FoveatedEncoder(nn.Module):
 
         # Squeeze sequence dim and project to output dimension.
         z = self.output_proj(q_hidden.squeeze(1))  # [B, output_dim]
+
+        if return_attention:
+            return z, all_attn_weights
         return z
 
     # ======================================================================

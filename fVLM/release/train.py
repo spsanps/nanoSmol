@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from release.model import FoveatedVLM
+from release.model.multi_token_vlm import MultiTokenVLM
 from release.data.webdataset_loader import make_dataloader
 from release.data.text_interleave import InterleavedDataLoader
 from release.utils.distributed import (
@@ -40,6 +41,7 @@ from release.utils.distributed import (
 from release.utils.checkpoint import save_checkpoint, load_latest_checkpoint
 from release.utils.lr_schedule import get_cosine_schedule_with_warmup
 from release.utils.logging_utils import TrainingLogger
+from release.utils.attention_viz import compute_attention_entropy, save_attention_maps
 
 
 # --------------------------------------------------------------------------- #
@@ -65,13 +67,23 @@ def load_config(path: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 def build_model(cfg: dict, device: torch.device):
-    model = FoveatedVLM(
-        llm_name=cfg["model"]["llm"],
-        dino_name=cfg["model"]["dino"],
-        query_dim=cfg["model"].get("query_dim", 384),
-        visual_scale=cfg["model"].get("visual_scale", 0.14),
-        lambda_coarse=cfg["model"].get("lambda_coarse", 0.0),
-    )
+    if cfg["model"].get("multi_token", False):
+        model = MultiTokenVLM(
+            llm_name=cfg["model"]["llm"],
+            dino_name=cfg["model"]["dino"],
+            tokens_per_frame=cfg["model"].get("tokens_per_frame", 16),
+            visual_scale=cfg["model"].get("visual_scale", 0.14),
+        )
+        if is_main_process():
+            print(f"  Model: MultiTokenVLM ({cfg['model'].get('tokens_per_frame', 16)} tokens/frame)")
+    else:
+        model = FoveatedVLM(
+            llm_name=cfg["model"]["llm"],
+            dino_name=cfg["model"]["dino"],
+            query_dim=cfg["model"].get("query_dim", 384),
+            visual_scale=cfg["model"].get("visual_scale", 0.14),
+            lambda_coarse=cfg["model"].get("lambda_coarse", 0.0),
+        )
 
     # Initialise from a previous-stage checkpoint (Stage 2 loads Stage 1, etc.)
     init_from = cfg["model"].get("init_from")
@@ -87,8 +99,14 @@ def build_model(cfg: dict, device: torch.device):
     model = model.to(device)
 
     # ---- Freeze parameters based on config ----
-    if cfg["model"].get("freeze_dino", False):
-        for p in model.encoder.dino.parameters():
+    dino_module = getattr(model, 'encoder', None)
+    if dino_module is not None:
+        dino_module = getattr(dino_module, 'dino', None)
+    if dino_module is None:
+        dino_module = getattr(model, 'dino', None)
+
+    if cfg["model"].get("freeze_dino", False) and dino_module is not None:
+        for p in dino_module.parameters():
             p.requires_grad = False
         if is_main_process():
             print("  Frozen: DINO encoder")
@@ -174,13 +192,23 @@ def build_val_loader(cfg: dict):
 # --------------------------------------------------------------------------- #
 
 @torch.no_grad()
-def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg):
-    """Run validation and return average loss (reduced across ranks)."""
+def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg,
+             save_attn_dir=None, step=0):
+    """Run validation and return dict of average losses + attention entropy."""
     model.eval()
+    raw_model = model.module if hasattr(model, "module") else model
+    is_foveated = hasattr(raw_model, "encoder")
+
     total_loss = 0.0
+    total_fine = 0.0
+    total_coarse = 0.0
+    total_entropy = 0.0
+    entropy_count = 0
     count = 0
     max_samples = cfg.get("eval", {}).get("max_samples", 1000)
     eval_mode = "coarse_only" if cfg["model"].get("coarse_only", False) else "coarse_fine"
+    attn_samples_saved = 0
+    max_attn_saves = 10  # save attention maps for first 10 eval batches
 
     for batch in val_loader:
         if count >= max_samples:
@@ -202,12 +230,51 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg):
 
         bs = batch["frames"].shape[0]
         total_loss += outputs["loss"].item() * bs
+        total_fine += outputs.get("fine_loss", outputs["loss"]).item() * bs
+        total_coarse += outputs.get("coarse_loss", torch.tensor(0.0)).item() * bs
         count += bs
 
-    avg_loss = total_loss / max(count, 1)
-    avg_loss_t = torch.tensor(avg_loss, device=device)
-    avg_loss_t = reduce_mean(avg_loss_t)
-    return avg_loss_t.item()
+        # Attention entropy (foveated model only, sample periodically)
+        if is_foveated and entropy_count < 50:
+            try:
+                frames = batch["frames"]
+                B, T = frames.shape[:2]
+                per_frame_caches = raw_model._encode_all_frames(frames)
+                q_static = raw_model.q_static.expand(B, -1)
+                # Compute entropy on first frame
+                _, attn_w = raw_model.encoder.query_attend(
+                    q_static, per_frame_caches[0], return_attention=True,
+                )
+                total_entropy += compute_attention_entropy(attn_w) * bs
+                entropy_count += bs
+
+                # Save attention maps for a few samples
+                if save_attn_dir and attn_samples_saved < max_attn_saves:
+                    for t in range(min(T, 4)):
+                        if t > 0:
+                            _, attn_w = raw_model.encoder.query_attend(
+                                q_static, per_frame_caches[t], return_attention=True,
+                            )
+                        save_attention_maps(
+                            attn_w, save_attn_dir, step,
+                            sample_idx=0, frame_idx=t,
+                            prefix=f"attn_s{attn_samples_saved:03d}",
+                        )
+                    attn_samples_saved += 1
+            except Exception:
+                pass  # don't break eval if attention extraction fails
+
+    avg_loss = reduce_mean(torch.tensor(total_loss / max(count, 1), device=device)).item()
+    avg_fine = reduce_mean(torch.tensor(total_fine / max(count, 1), device=device)).item()
+    avg_coarse = reduce_mean(torch.tensor(total_coarse / max(count, 1), device=device)).item()
+    avg_entropy = total_entropy / max(entropy_count, 1) if entropy_count > 0 else 0.0
+
+    return {
+        "val_loss": avg_loss,
+        "val_fine_loss": avg_fine,
+        "val_coarse_loss": avg_coarse,
+        "attention_entropy": avg_entropy,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -398,6 +465,8 @@ def train(cfg: dict, args):
             if is_main_process() and global_step % log_every == 0:
                 elapsed = time.time() - t0
                 samples_per_sec = samples_seen / max(elapsed, 1e-6)
+                lr_groups = {g.get("name", "default"): g["lr"]
+                             for g in optimizer.param_groups}
                 logger.log_step(
                     step=global_step,
                     loss=outputs["loss"].item(),
@@ -407,21 +476,35 @@ def train(cfg: dict, args):
                     grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     samples_seen=samples_seen,
                     samples_per_sec=samples_per_sec,
+                    lr_groups=lr_groups,
                 )
 
             # ---- Evaluation ----
             if val_loader is not None and global_step % eval_every == 0:
-                val_loss = evaluate(model, val_loader, device, amp_dtype, use_amp, cfg)
+                attn_dir = os.path.join(ckpt_dir, "attention_maps") if is_main_process() else None
+                val_result = evaluate(
+                    model, val_loader, device, amp_dtype, use_amp, cfg,
+                    save_attn_dir=attn_dir, step=global_step,
+                )
                 if is_main_process():
-                    logger.log_eval(step=global_step, val_loss=val_loss)
+                    logger.log_eval(
+                        step=global_step,
+                        val_loss=val_result["val_loss"],
+                        val_fine_loss=val_result["val_fine_loss"],
+                        val_coarse_loss=val_result["val_coarse_loss"],
+                        attention_entropy=val_result["attention_entropy"],
+                    )
                 model.train()
 
             # ---- Checkpoint ----
             if global_step % save_every == 0:
                 metric = None
                 if val_loader is not None and global_step % eval_every != 0:
-                    metric = evaluate(model, val_loader, device, amp_dtype, use_amp, cfg)
+                    val_result = evaluate(model, val_loader, device, amp_dtype, use_amp, cfg)
+                    metric = val_result["val_loss"]
                     model.train()
+                elif val_loader is not None:
+                    metric = val_result["val_loss"]  # reuse from eval above
                 save_checkpoint(
                     model=model,
                     optimizer=optimizer,
@@ -445,6 +528,7 @@ def train(cfg: dict, args):
 
     if is_main_process():
         elapsed = time.time() - t0
+        logger.save_run_summary(final_loss=outputs["loss"].item(), total_samples=samples_seen)
         logger.finish()
         print(f"\n  Training complete: {global_step} steps, "
               f"{samples_seen:,} samples, {elapsed/3600:.1f}h")
@@ -455,4 +539,5 @@ def train(cfg: dict, args):
 if __name__ == "__main__":
     args = parse_args()
     cfg = load_config(args.config)
+    cfg["_config_path"] = args.config
     train(cfg, args)
