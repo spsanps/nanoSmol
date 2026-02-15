@@ -1,0 +1,70 @@
+# =============================================================================
+# Baseline B2: SmolVLM-style (49 tokens/frame, no foveation)
+# =============================================================================
+# SmolVLM2-like approach: DINOv2 patches → 7x7 pool → 49 tokens → project → LLM.
+# Mimics SmolVLM2's pixel_shuffle connector but with DINOv2 (iso-backbone comparison).
+#
+# Token count ladder for iso-FLOP analysis:
+#   - Foveated:  1 token/frame  (ours)
+#   - B1:       16 tokens/frame (4x4 pool)
+#   - B2:       49 tokens/frame (7x7 pool, SmolVLM2-like)
+#
+# At matched training FLOPs, foveated sees ~49x more data than B2.
+# If quality is close → foveation efficiency win is proven.
+#
+# Note: B2 will be much slower per sample (49x more visual tokens in LLM).
+# May need gradient_checkpointing or reduced batch_size.
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-135M-Instruct
+  dino: /workspace/models/dinov2-small
+  multi_token: true
+  tokens_per_frame: 49           # <-- 7x7 pool (SmolVLM2-like token count)
+  visual_scale: 0.14
+  gradient_checkpointing: false
+
+data:
+  train_shards: "/workspace/data/openvid/*.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 8
+
+training:
+  total_samples: 300_000
+  batch_size: 1                  # 49 tok/frame × T frames = very long LLM sequences
+  grad_accum: 32                 # Keep effective batch = 32
+  lr_connector: 1.0e-4
+  lr_dino: 1.0e-5
+  lr_llm: 1.0e-5
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: cosine
+  dtype: bfloat16
+  compile: false
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/ablations/B2_smolvlm_style
+  save_every_steps: 1000
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 200
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-ablations
+  run_name: B2_smolvlm_style
