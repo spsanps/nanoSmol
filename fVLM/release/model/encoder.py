@@ -242,6 +242,57 @@ class FoveatedEncoder(nn.Module):
         return z
 
     # ======================================================================
+    # Phase 2b: shallow query-attend  (single cross-attention on final features)
+    # ======================================================================
+
+    def shallow_query_attend(
+        self,
+        query: torch.Tensor,
+        patch_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Single cross-attention on final DINO features (no layer propagation).
+
+        This is the "shallow" baseline: the query does ONE attention over the
+        already-computed final patch embeddings.  Different queries produce
+        near-identical outputs (BUG-004 validation) because there's no deep
+        propagation to amplify query differences.
+
+        Args:
+            query:          ``[B, query_dim]``
+            patch_features: ``[B, N+1, D]``  (output of encode_patches)
+
+        Returns:
+            z: ``[B, output_dim]``
+        """
+        B = query.shape[0]
+
+        # Project query into DINO space
+        q = self.query_input_proj(query).unsqueeze(1)  # [B, 1, D]
+
+        # Single cross-attention: query attends to all patches
+        Q = q.view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)
+        K = patch_features.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        V = K.clone()  # K=V from the same features (no separate projections)
+
+        # Use the last layer's K/V projections for proper attention
+        last_layer = self.dino.encoder.layer[-1]
+        attn_mod = last_layer.attention.attention
+        normed = last_layer.norm1(patch_features)
+        K = attn_mod.key(normed).view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        V = attn_mod.value(normed).view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
+
+        attn_out = F.scaled_dot_product_attention(Q, K, V)  # [B, H, 1, d]
+
+        # Merge heads
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, 1, self.dino_dim)
+
+        # Output projection + layer norm
+        q_hidden = self.dino.layernorm(attn_out)
+        z = self.output_proj(q_hidden.squeeze(1))  # [B, output_dim]
+        return z
+
+    # ======================================================================
     # Convenience: full forward (encode + attend in one call)
     # ======================================================================
 

@@ -90,6 +90,7 @@ def build_model(cfg: dict, device: torch.device):
             query_dim=cfg["model"].get("query_dim", 384),
             visual_scale=cfg["model"].get("visual_scale", 0.14),
             lambda_coarse=cfg["model"].get("lambda_coarse", 0.0),
+            deep_query=cfg["model"].get("deep_query", True),
         )
 
     # Initialise from a previous-stage checkpoint (Stage 2 loads Stage 1, etc.)
@@ -247,7 +248,7 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg,
             try:
                 frames = batch["frames"]
                 B, T = frames.shape[:2]
-                kv_cache, mask_flat = raw_model._encode_all_frames(frames)
+                kv_cache, _, mask_flat = raw_model._encode_all_frames(frames)
                 q_static = raw_model.q_static.expand(B, -1)
                 # Compute entropy on first frame
                 frame0_kv = raw_model._extract_frame_kv(kv_cache, mask_flat, B, T, 0)

@@ -47,6 +47,7 @@ class FoveatedVLM(nn.Module):
         query_dim: int = 384,
         visual_scale: float = 0.14,
         lambda_coarse: float = 0.0,
+        deep_query: bool = True,
     ):
         super().__init__()
 
@@ -82,6 +83,7 @@ class FoveatedVLM(nn.Module):
         self.visual_scale = visual_scale
         self.lambda_coarse = lambda_coarse
         self.query_dim = query_dim
+        self.deep_query = deep_query
 
         # ---- Dimension bookkeeping (useful for external code) ----
         self.dino_dim = dino_dim
@@ -127,10 +129,11 @@ class FoveatedVLM(nn.Module):
         frames     : [B, T, 3, 224, 224]
         frame_mask : [B, T] bool — True for real frames, False for padding.
 
-        Returns (kv_cache, mask_flat):
-            kv_cache  : list of (K, V) per layer, each [n_real, N+1, D]
-                        (compact — only real frames, no padding waste).
-            mask_flat : [B*T] bool tensor or None. Used to scatter results back.
+        Returns (kv_cache, patch_features, mask_flat):
+            kv_cache       : list of (K, V) per layer, each [n_real, N+1, D]
+                             (compact — only real frames, no padding waste).
+            patch_features : [n_real, N+1, D] final DINO embeddings (for shallow mode).
+            mask_flat      : [B*T] bool tensor or None. Used to scatter results back.
         """
         B, T, C, H, W = frames.shape
         BT = B * T
@@ -150,25 +153,39 @@ class FoveatedVLM(nn.Module):
 
         # Chunked encoding to prevent OOM on batches with many real frames
         if real_frames.shape[0] <= self._MAX_ENCODE_CHUNK:
-            _, kv_cache = self.encoder.encode_patches(real_frames)
+            patch_features, kv_cache = self.encoder.encode_patches(real_frames)
         else:
-            kv_chunks = []
+            pf_chunks, kv_chunks = [], []
             for start in range(0, real_frames.shape[0], self._MAX_ENCODE_CHUNK):
-                _, kv_chunk = self.encoder.encode_patches(
+                pf_chunk, kv_chunk = self.encoder.encode_patches(
                     real_frames[start:start + self._MAX_ENCODE_CHUNK]
                 )
+                pf_chunks.append(pf_chunk)
                 kv_chunks.append(kv_chunk)
+            patch_features = torch.cat(pf_chunks, dim=0)
             kv_cache = [
                 (torch.cat([c[li][0] for c in kv_chunks], dim=0),
                  torch.cat([c[li][1] for c in kv_chunks], dim=0))
                 for li in range(len(kv_chunks[0]))
             ]
 
-        return kv_cache, mask_flat
+        return kv_cache, patch_features, mask_flat
 
-    def _batched_query_attend(self, queries: torch.Tensor, kv_cache: list) -> torch.Tensor:
-        """Chunked query_attend to prevent OOM on large batches."""
+    def _batched_query_attend(self, queries: torch.Tensor, kv_cache: list,
+                              patch_features: torch.Tensor = None) -> torch.Tensor:
+        """Chunked query_attend (deep) or shallow_query_attend to prevent OOM."""
         n = queries.shape[0]
+        if not self.deep_query:
+            # Shallow mode: single cross-attention on final features
+            if n <= self._MAX_ENCODE_CHUNK:
+                return self.encoder.shallow_query_attend(queries, patch_features)
+            chunks = []
+            for start in range(0, n, self._MAX_ENCODE_CHUNK):
+                end = min(start + self._MAX_ENCODE_CHUNK, n)
+                chunks.append(self.encoder.shallow_query_attend(
+                    queries[start:end], patch_features[start:end]))
+            return torch.cat(chunks, dim=0)
+        # Deep mode: propagate through all DINO layers
         if n <= self._MAX_ENCODE_CHUNK:
             return self.encoder.query_attend(queries, kv_cache)
         chunks = []
@@ -180,16 +197,17 @@ class FoveatedVLM(nn.Module):
 
     def _query_all_frames(
         self, query: torch.Tensor, kv_cache: list,
-        B: int, T: int, mask_flat=None,
+        B: int, T: int, mask_flat=None, patch_features=None,
     ) -> torch.Tensor:
         """
         Apply a single query to every frame in ONE batched query_attend call.
 
-        query     : [B, query_dim]
-        kv_cache  : list of (K, V) per layer, each [n_real, N+1, D]
-        B, T      : batch and temporal dimensions
-        mask_flat : [B*T] bool or None
-        Returns   : [B, T, dino_dim]
+        query          : [B, query_dim]
+        kv_cache       : list of (K, V) per layer, each [n_real, N+1, D]
+        B, T           : batch and temporal dimensions
+        mask_flat      : [B*T] bool or None
+        patch_features : [n_real, N+1, D] (needed for shallow mode)
+        Returns        : [B, T, dino_dim]
         """
         BT = B * T
         dd = self.encoder.dino_dim
@@ -202,26 +220,27 @@ class FoveatedVLM(nn.Module):
             if n_real == 0:
                 return torch.zeros(B, T, dd, device=query.device, dtype=query.dtype)
             query_real = query_exp[mask_flat]                     # [n_real, qd]
-            z_real = self._batched_query_attend(query_real, kv_cache)
+            z_real = self._batched_query_attend(query_real, kv_cache, patch_features)
             z_flat = torch.zeros(BT, dd, device=query.device, dtype=z_real.dtype)
             z_flat[mask_flat] = z_real
         else:
-            z_flat = self._batched_query_attend(query_exp, kv_cache)
+            z_flat = self._batched_query_attend(query_exp, kv_cache, patch_features)
 
         return z_flat.reshape(B, T, dd)
 
     def _query_all_frames_batched(
         self, queries: torch.Tensor, kv_cache: list,
-        B: int, T: int, mask_flat=None,
+        B: int, T: int, mask_flat=None, patch_features=None,
     ) -> torch.Tensor:
         """
         Apply per-frame queries in ONE batched query_attend call.
 
-        queries   : [B, T, query_dim]
-        kv_cache  : list of (K, V) per layer, each [n_real, N+1, D]
-        B, T      : batch and temporal dimensions
-        mask_flat : [B*T] bool or None
-        Returns   : [B, T, dino_dim]
+        queries        : [B, T, query_dim]
+        kv_cache       : list of (K, V) per layer, each [n_real, N+1, D]
+        B, T           : batch and temporal dimensions
+        mask_flat      : [B*T] bool or None
+        patch_features : [n_real, N+1, D] (needed for shallow mode)
+        Returns        : [B, T, dino_dim]
         """
         BT = B * T
         dd = self.encoder.dino_dim
@@ -232,11 +251,11 @@ class FoveatedVLM(nn.Module):
             if n_real == 0:
                 return torch.zeros(B, T, dd, device=queries.device, dtype=queries.dtype)
             query_real = queries_flat[mask_flat]                   # [n_real, qd]
-            z_real = self._batched_query_attend(query_real, kv_cache)
+            z_real = self._batched_query_attend(query_real, kv_cache, patch_features)
             z_flat = torch.zeros(BT, dd, device=queries.device, dtype=z_real.dtype)
             z_flat[mask_flat] = z_real
         else:
-            z_flat = self._batched_query_attend(queries_flat, kv_cache)
+            z_flat = self._batched_query_attend(queries_flat, kv_cache, patch_features)
 
         return z_flat.reshape(B, T, dd)
 
@@ -348,11 +367,11 @@ class FoveatedVLM(nn.Module):
         S = input_ids.shape[1]
 
         # ---- Step 0: Encode all frames (DINO, shared across both passes) ----
-        kv_cache, mask_flat = self._encode_all_frames(frames, frame_mask)
+        kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
 
         # ---- Pass 1: Coarse ----
         q_static = self.q_static.expand(B, -1)                     # [B, qd]
-        z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat)  # [B,T,dd]
+        z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat, patch_features)  # [B,T,dd]
         z_coarse_llm = self._project_visual(z_coarse)              # [B,T,ld]
 
         # Build coarse sequence: [visual_coarse, text]
@@ -375,7 +394,7 @@ class FoveatedVLM(nn.Module):
         shifted_queries = torch.cat([q_init, queries[:, :-1]], dim=1)  # [B,T,qd]
 
         # ---- Pass 2: Fine ----
-        z_fine = self._query_all_frames_batched(shifted_queries, kv_cache, B, T, mask_flat)  # [B,T,dd]
+        z_fine = self._query_all_frames_batched(shifted_queries, kv_cache, B, T, mask_flat, patch_features)  # [B,T,dd]
         z_fine_llm = self._project_visual(z_fine)                  # [B,T,ld]
 
         # Build fine sequence: [visual_fine, text]
@@ -461,10 +480,10 @@ class FoveatedVLM(nn.Module):
         """
         B, T = frames.shape[:2]
 
-        kv_cache, mask_flat = self._encode_all_frames(frames, frame_mask)
+        kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
 
         q_static = self.q_static.expand(B, -1)
-        z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat)
+        z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat, patch_features)
         z_coarse_llm = self._project_visual(z_coarse)
 
         if input_ids is not None:
@@ -545,7 +564,7 @@ class FoveatedVLM(nn.Module):
 
         # Encode all frames with DINO up front (this is OK -- DINO encoding
         # does not depend on the query, only query_attend does).
-        kv_cache, mask_flat = self._encode_all_frames(frames, frame_mask)
+        kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
 
         # Enable KV cache on the LLM for incremental decoding
         orig_use_cache = self.llm.config.use_cache
