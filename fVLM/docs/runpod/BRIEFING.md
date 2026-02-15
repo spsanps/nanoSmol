@@ -1,10 +1,13 @@
 # RunPod GPU Briefing: Foveated VLM Project
 
-**READ THIS FIRST.** You are Claude Code on a RunPod GPU pod (2xA100-80GB). All data is prepared, all code is ready. Your job: run ablation experiments and scaling grid, then train the final model.
+**READ THIS FIRST.** You are Claude Code on a RunPod GPU pod (1x RTX 5090 32GB). All data is prepared, all code is ready. Your job: run ablation experiments and scaling grid, then train the final model.
 
 **Date:** 2026-02-15
-**Budget:** ~$400 remaining of $500
+**GPU:** 1x NVIDIA RTX 5090, 32GB VRAM, CUDA 12.9, PyTorch 2.8.0+cu128 (system)
+**Budget:** ~$400 remaining of $500 ($0.89/hr for 5090)
 **Network volume:** `/workspace` persists across pods (506GB used / 1TB)
+
+**IMPORTANT — 5090 VRAM limit:** 1.7B model (~30GB) will NOT fit on this GPU. Phase 1a ablations (all 135M) are fine. For Phase 1b scaling runs at 1.7B, we'll need to switch to an A100 pod briefly.
 
 ---
 
@@ -14,18 +17,26 @@
 # 1. Environment setup
 source /workspace/.bashrc_runpod
 
-# 2. Verify GPUs
-nvidia-smi   # Should show 2x A100 80GB
+# 2. Verify GPU
+nvidia-smi   # Should show 1x RTX 5090 32GB
 
-# 3. Activate venv
+# 3. Fix venv torch (CPU pod installed CPU-only torch — must upgrade for GPU)
 source /workspace/venv311/bin/activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 # 4. Pull latest code
 cd /workspace/workdir/nanoSmol/fVLM
 git pull origin main
 
-# 5. Read the execution plan
-cat docs/GPU_PHASE1_PLAN.md
+# 5. Dry run to verify everything works
+python release/train.py --config release/configs/ablations/LR1.yaml --dry-run
+```
+
+**Note:** Claude Code cannot run as root with `--dangerously-skip-permissions`. Create a non-root user first:
+```bash
+useradd -m -s /bin/bash worker
+cp -r /root/.ssh /home/worker/.ssh 2>/dev/null; chown -R worker:worker /home/worker
+# Then reconnect as worker, or: su - worker
 ```
 
 ---
@@ -134,36 +145,15 @@ All paths are under `/workspace/data/`. All shards use unified `{"user": "...", 
 
 ---
 
-## 3 Bugs to Fix First
+## 3 Bugs — ALREADY FIXED
 
-Before running any experiments, fix these (found in code audit):
+These were found in code audit and **already fixed in local commit `0ceb8c4` on this pod** (not yet pushed to git). Verify they're applied:
 
-### Bug 1: dtype mismatch in foveated_vlm.py
-In `forward_coarse_fine()`, the loss mask concat uses mismatched dtypes:
-```python
-# Find this line (around line 314):
-visual_no_loss = torch.zeros(B, T, dtype=torch.long, device=frames.device)
-# Change to:
-visual_no_loss = torch.zeros(B, T, dtype=attention_mask.dtype, device=attention_mask.device)
-```
+1. **foveated_vlm.py ~line 314**: `dtype=attention_mask.dtype` (was `torch.long`)
+2. **multi_token_vlm.py ~line 192**: `dtype=loss_mask.dtype` (was `torch.long`)
+3. **run_scaling_grid.py ~line 226**: `write_header = not results_csv.exists()` (removed `or i == 0`)
 
-### Bug 2: dtype mismatch in multi_token_vlm.py
-Same issue, around line 192:
-```python
-# Find:
-visual_no_loss = torch.zeros(B, V_tokens, dtype=torch.long, device=frames.device)
-# Change to:
-visual_no_loss = torch.zeros(B, V_tokens, dtype=attention_mask.dtype, device=attention_mask.device)
-```
-
-### Bug 3: CSV header in run_scaling_grid.py
-Around line 226, the header logic corrupts CSV on re-runs:
-```python
-# Find:
-write_header = not results_csv.exists() or i == 0
-# Change to:
-write_header = not results_csv.exists()
-```
+If `git pull` overwrites these fixes, re-apply them. The commit message is "fix: dtype mismatch in loss masks + CSV header logic".
 
 ---
 
@@ -181,16 +171,16 @@ All runs: SmolLM2-135M, 1M samples, same eval set, seed 42.
 | Day 2 | LR2 + LR3 + LR4, A1 | LR ratio + shallow query |
 | Day 3 | A6 + B1, A8a + A8b + D1 | Coarse-only + baseline + image handling |
 
-**How to run:**
+**How to run (single GPU, no torchrun needed):**
 ```bash
-torchrun --nproc_per_node=2 release/train.py --config release/configs/ablations/F1_freeze_both.yaml
-torchrun --nproc_per_node=2 release/train.py --config release/configs/ablations/F2_freeze_llm.yaml
-torchrun --nproc_per_node=2 release/train.py --config release/configs/ablations/baseline.yaml
+python release/train.py --config release/configs/ablations/F1_freeze_both.yaml
+python release/train.py --config release/configs/ablations/F2_freeze_llm.yaml
+python release/train.py --config release/configs/ablations/LR1.yaml
 ```
 
 **Dry run first:**
 ```bash
-python release/train.py --config release/configs/ablations/baseline.yaml --dry-run
+python release/train.py --config release/configs/ablations/LR1.yaml --dry-run
 ```
 
 ### Phase 1b: Scaling Grid (24 runs, ~1-2 days, ~$21)
