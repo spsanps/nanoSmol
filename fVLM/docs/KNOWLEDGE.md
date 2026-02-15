@@ -67,7 +67,8 @@ A novel vision-language model that processes video frame-by-frame with **ONE tok
 
 ## Dataset Inventory
 
-*Last verified: 2026-02-13*
+*Last verified: 2026-02-15*
+*Full citations, licenses, and BibTeX: see [DATA_SOURCES.md](DATA_SOURCES.md)*
 
 All training data lives on RunPod at `/workspace/data/`. All shards are webdataset `.tar` files. All frames are 224x224 JPEG at 1 FPS, max 64 frames per clip.
 
@@ -94,16 +95,16 @@ All training data lives on RunPod at `/workspace/data/`. All shards are webdatas
 - **Stage:** 1 (replaces dead WebVid-10M)
 - **Has manifest:** No (has `progress.json` with part tracking)
 
-#### LLaVA-Video-178K (Video SFT) — IN PROGRESS
-- **Path:** `/workspace/data/llava_video_shards/` (main) + `llava_video_shards_b/` (stream B)
+#### LLaVA-Video-178K (Video SFT) — COMPLETE
+- **Path:** `/workspace/data/llava_video_shards/`
 - **Source:** HuggingFace `lmms-lab/LLaVA-Video-178K` (multiple duration/source subsets)
-- **Samples:** ~110K+ | **Shards:** 131 + 6 = 137 | **Size:** 41GB + 3GB = 44GB
+- **Samples:** ~266K | **Shards:** 266 | **Size:** 86GB
 - **Type:** Video QA/captioning, variable frames (1-64)
 - **Shard format:** `{shard}_{clip}.{frame_idx:03d}.jpg` + `{shard}_{clip}.json`
 - **JSON fields:** `caption` (str, raw), `frame_count` (int), `source` ("llava_video"), `video_id` (str)
-- **Subsets processed:** 0-30s academic, 0-30s youtube (~74K), 30-60s academic, 30-60s youtube (in progress), 1-2m academic (in progress), activitynetqa, nextqa, perceptiontest, 2-3m subsets
+- **License:** Academic research and education only
 - **Stage:** 3 (Video SFT)
-- **Has manifest:** In progress
+- **Has manifest:** Yes
 
 #### LLaVA YouTube Frames (Video SFT, pre-tokenized) — COMPLETE
 - **Path:** `/workspace/data/stage3_youtube/`
@@ -164,13 +165,32 @@ All training data lives on RunPod at `/workspace/data/`. All shards are webdatas
 - **Note:** Annotations without frames. Superseded by `llava_video_shards/` which has actual frames.
 - **Has manifest:** Yes
 
-#### VISTA-400K (Temporal Reasoning) — JUST LAUNCHED
-- **Path:** `/workspace/data/vista_shards/` (empty, processing started)
+#### VISTA-400K (Temporal Reasoning) — COMPLETE
+- **Path:** `/workspace/data/vista_shards/` + `/workspace/data/vista_extra_shards/`
 - **Source:** HuggingFace `weili-0234/VISTA-400k-frames` (pre-extracted JPEGs) + `TIGER-Lab/VISTA-400K` (annotations)
-- **Expected:** ~175-200K samples | **Size:** ~40-60GB estimated
-- **Type:** Multi-frame temporal reasoning (spatial NIAH, event relationships, long video captions)
+- **Samples:** ~237K (171K main + 66K extra) | **Shards:** 237 (171 + 66) | **Size:** 59GB
+- **Type:** Multi-frame temporal reasoning (spatial NIAH, event relationships, long video captions, 12 task types)
+- **License:** MIT
 - **Stage:** 3
-- **Status:** Serial pipeline running — download tar.gz → extract → resize 224x224 → match annotations → pack shards → delete
+- **Has manifest:** Yes
+
+#### Vript Long (Video Captioning) — COMPLETE
+- **Path:** `/workspace/data/vript_long_shards/`
+- **Source:** HuggingFace `Mutonix/Vript` (long video clips)
+- **Samples:** ~400K | **Shards:** 400 | **Size:** 53GB
+- **Type:** Video captioning, variable frames (1-64)
+- **License:** Academic research only
+- **Stage:** 3
+- **Has manifest:** Yes
+
+#### ShareGPT4Video (Video Captioning) — COMPLETE
+- **Path:** `/workspace/data/sharegpt4video_shards/`
+- **Source:** HuggingFace `ShareGPT4Video/ShareGPT4Video`
+- **Samples:** ~37K | **Shards:** 61 | **Size:** 9.2GB
+- **Type:** Video captioning with GPT-4V-generated descriptions
+- **License:** CC-BY-NC-4.0
+- **Stage:** 3
+- **Has manifest:** Yes
 
 ### Evaluation Datasets
 
@@ -198,16 +218,17 @@ All training data lives on RunPod at `/workspace/data/`. All shards are webdatas
 - **Size:** 2.2MB (annotations only, 285GB videos deferred)
 - **SmolVLM2 score:** 55.2
 
-### Data Mix Summary (2026-02-13)
+### Data Mix Summary (2026-02-15)
 
 | Type | Samples | % of Total | Target % |
 |------|---------|-----------|----------|
-| Video (OpenVid + LLaVA-Video + Vript + WebVid + VISTA) | ~770K+ | ~23% | **40-50%** |
-| Image (Cauldron + RLAIF-V) | ~2.08M | ~62% | ~30-35% |
-| Text (SmolTalk) | ~490K | ~15% | ~15-20% |
-| **Total** | **~3.34M+** | | |
+| Video (OpenVid + LLaVA-Video + Vript + WebVid + VISTA + ShareGPT4Video) | ~1.84M | ~41% | **40-50%** |
+| Image (Cauldron + RLAIF-V) | ~2.08M | ~46% | ~30-35% |
+| Text (SmolTalk) | ~490K | ~11% | ~15-20% |
+| **Total** | **~4.5M** | | |
 
-**Video gap:** Need ~600-700K more video clips to reach 40-50%. VISTA-400K (~175K usable) in progress. Remaining gap sources: more LLaVA-Video subsets (1-2m youtube, 3-10m), ShareGPT4Video, MovieChat, VideoStar.
+**Video target met.** With VISTA, Vript long, LLaVA-Video expanded, and ShareGPT4Video, video data now comprises ~41% of the total mix.
+Full citations and licenses: see [DATA_SOURCES.md](DATA_SOURCES.md).
 
 ### Shard Format Conventions
 
