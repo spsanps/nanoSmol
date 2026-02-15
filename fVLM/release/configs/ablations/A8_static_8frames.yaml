@@ -36,13 +36,13 @@ data:
   text_ratio: 0.14
   max_frames: 64
   frame_size: 224
-  num_workers: 4
+  num_workers: 8
   replicate_image_frames: 8     # <-- ABLATION: replicate images to 8 frames
 
 training:
-  total_samples: 1_000_000
-  batch_size: 16
-  grad_accum: 2
+  total_samples: 300_000
+  batch_size: 4
+  grad_accum: 8
   lr_connector: 1.0e-4
   lr_dino: 1.0e-5
   lr_llm: 1.0e-5
@@ -59,14 +59,14 @@ loss:
 
 checkpoint:
   save_dir: /workspace/checkpoints/ablations/A8_static_8frames
-  save_every_steps: 500
+  save_every_steps: 1000
   keep_last: 2
   keep_best: 1
   metric: val_loss
   resume: auto
 
 eval:
-  every_steps: 250
+  every_steps: 200
   max_samples: 1000
 
 wandb:
