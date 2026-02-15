@@ -1,196 +1,146 @@
-# Claude Working Guide: Foveated VLM Project
+# Foveated VLM — Claude Code Guide
 
-## RunPod Infrastructure
+## Project Overview
 
-**Pod Specs:**
-- CPU pod: 8 vCPU, 30GB RAM, ~1TB workspace at /workspace, 5GB system disk
-- GPU pod (future): 2xA100 80GB, ~$1.39/hr
+Foveated Vision-Language Model: a novel VLM that compresses each video frame to **1 visual token** via query-guided cross-attention on DINOv2 features. The LLM controls WHERE to look by generating the query for the next frame.
 
-**CRITICAL: Cache redirects (run FIRST on every new pod):**
-```bash
-source /workspace/.bashrc_runpod
-```
-This redirects HOME, pip, HuggingFace, and tmp to /workspace (system disk is only 5GB).
+- **Architecture**: DINOv2 encoder + foveated cross-attention + SmolLM2 LLM
+- **Two-pass training**: coarse (static query, parallel) → fine (dynamic queries, parallel)
+- **Key claim**: 1 foveated token ≈ 16 standard tokens in quality
 
-**Auth:** Credentials in `/workspace/.env` (gitignored). Re-login with:
-```bash
-source /workspace/.bashrc_runpod
-/workspace/venv311/bin/python -c "from huggingface_hub import login; import os; login(token=os.environ.get('HF_TOKEN', open('/workspace/.env').read().split('HF_TOKEN=')[1].split('\n')[0]))"
-```
-
-**Inter-Claude Communication:** `/workspace/comms/BOARD.md` — append-only, timestamped, `LOCAL` vs `RUNPOD` source tags.
-
----
-
-## Canonical Codebase: `release/`
-
-The `release/` folder is THE codebase. Old `src/` and `scripts/` are legacy reference only.
+## Codebase Layout
 
 ```
-release/
-├── train.py                    # torchrun --nproc_per_node=2 release/train.py --config ...
-├── evaluate.py                 # python release/evaluate.py --checkpoint ... --mode coarse_fine
-├── model/
-│   ├── foveated_vlm.py         # FoveatedVLM: 3 forward modes, text CE loss only
-│   └── encoder.py              # FoveatedEncoder: deep query on DINOv2, all bugs pre-fixed
-├── data/
-│   ├── webdataset_loader.py    # Tar shard loader, variable frames (1-64)
-│   ├── collate.py              # Pads frames + text, creates masks
-│   └── text_interleave.py      # 14% SmolTalk text retention mixing
-├── utils/
-│   ├── distributed.py          # DDP setup, rank helpers, reduce_mean
-│   ├── checkpoint.py           # Save/load with best-metric tracking
-│   ├── lr_schedule.py          # Cosine with linear warmup
-│   └── logging_utils.py        # wandb + CSV + stdout
-├── eval/
-│   └── metrics.py              # CIDEr, BLEU, METEOR, VQA accuracy
-├── configs/
-│   ├── stage1_webvid.yaml      # Stage 1: WebVid captioning
-│   ├── stage2_vl_sft.yaml      # Stage 2: VL SFT (Cauldron)
-│   ├── stage3_video_sft.yaml   # Stage 3: Video SFT
-│   ├── ablations/              # A1-A7, LR1-LR4
-│   └── scaling/                # Scaling grid configs
-└── scripts/
-    ├── precompute.py           # Data preprocessing (tokenize + shard)
-    ├── validate_shards.py      # Data integrity checks
-    └── create_shard_manifest.py # Shard metadata for bucketed batching
+release/                    ← CANONICAL codebase (ignore everything else)
+  model/
+    foveated_vlm.py         ← Main model (FoveatedVLM)
+    encoder.py              ← DINOv2 + deep query cross-attention (FoveatedEncoder)
+    multi_token_vlm.py      ← B1 baseline: 16 tok/frame, no foveation (MultiTokenVLM)
+    __init__.py
+  data/
+    webdataset_loader.py    ← WebDataset loader (handles unified user/assistant format)
+    text_interleave.py      ← Interleaves vision + text batches for retention
+  utils/
+    logging_utils.py        ← TrainingLogger (wandb + CSV + run summary JSON)
+    checkpoint.py           ← Save/load/resume with best tracking
+    distributed.py          ← DDP helpers
+    lr_schedule.py          ← Cosine warmup scheduler
+    flop_counter.py         ← FLOP estimation + iso-FLOP sample calculator
+    attention_viz.py        ← Attention entropy + heatmap saver
+  scripts/
+    run_scaling_grid.py     ← Phase 1b scaling grid runner (24 runs from template)
+    precompute.py           ← Tokenization helpers (tokenize_stage1, tokenize_sft)
+  configs/
+    ablations/              ← Phase 1a ablation configs (21 YAML files)
+    scaling/                ← Phase 1b scaling configs
+
+docs/
+  GPU_PHASE1_PLAN.md        ← Full plan: ablations + scaling grid + decision framework
+  runpod/
+    GPU_HANDOFF.md          ← Config→RunID mapping, execution order, known gotchas
+    REPO_SYNC_INSTRUCTIONS.md
+  KNOWLEDGE.md              ← Bug history + experiment learnings
 ```
 
-**Key commands:**
-```bash
-# Training
-torchrun --nproc_per_node=2 release/train.py --config release/configs/stage1_webvid.yaml
+**Ignore**: `src/`, `scripts/`, `research/`, `core_docs/` — all legacy, superseded by `release/`.
 
-# Dry run (verify shapes, no training)
-python release/train.py --config release/configs/stage1_webvid.yaml --dry-run
+## Current State (2026-02-15)
 
-# Evaluation (3 modes: coarse_only, coarse_fine, autoregressive)
-python release/evaluate.py --config release/configs/stage1_webvid.yaml \
-    --checkpoint /workspace/checkpoints/stage1/best.pt --mode coarse_fine
+**Phase: Ready for GPU Phase 1a ablation runs.**
 
-# Data preprocessing
-python release/scripts/precompute.py smoltalk --stage 1
-python release/scripts/precompute.py cauldron
-python release/scripts/precompute.py webvid --workers 4
-```
+All code and data are ready. Next step is running 12 ablation experiments on 2xA100-80GB.
 
----
+### What to do next
 
-## Data Paths
+1. Read `docs/runpod/GPU_HANDOFF.md` for the complete run guide
+2. Read `docs/GPU_PHASE1_PLAN.md` for the full plan with decision framework
+3. Run ablations: `torchrun --nproc_per_node=2 release/train.py --config release/configs/ablations/<CONFIG>.yaml`
 
-| Dataset | Path | Samples | Type | Stage |
-|---------|------|---------|------|-------|
-| OpenVid-1M | `/workspace/data/openvid/*.tar` | 432K | Video (raw caption) | 1 |
-| WebVid (valid) | `/workspace/data/webvid/*.tar` | 19K | Video (pre-tokenized) | 1 |
-| Cauldron | `/workspace/data/cauldron_full/*.tar` | 2.0M | Image (pre-tokenized) | 2 |
-| LLaVA-Video | `/workspace/data/llava_video_shards/*.tar` | ~110K+ | Video (raw caption) | 3 |
-| LLaVA YouTube | `/workspace/data/stage3_youtube/*.tar` | 21.5K | Video (pre-tokenized) | 3 |
-| Vript | `/workspace/data/vript_shards/*.tar` | 10.2K | Video (raw caption) | 3 |
-| VISTA-400K | `/workspace/data/vista_shards/*.tar` | ~175K (est) | Video (in progress) | 3 |
-| RLAIF-V | `/workspace/data/rlaif_v/*.tar` | 83K | Image (preference) | Future |
-| SmolTalk | `/workspace/data/text_retention/stageN/*.tar` | 490K | Text-only | All (14%) |
-| Val 10K | `/workspace/data/eval/val_10k/*.tar` | 10K | Mixed | Eval |
-| Benchmarks | `/workspace/data/eval/benchmarks/` | — | Video-MME, MVBench, MLVU | Eval |
+### Phase 1a: 12 Ablation Runs
 
-Full dataset documentation with shard formats: `docs/KNOWLEDGE.md` → Dataset Inventory
+| Run | Config | What |
+|-----|--------|------|
+| F1 | `F1_freeze_both.yaml` | Connector only (both backbones frozen) |
+| F2 | `F2_freeze_llm.yaml` | Connector + DINO (LLM frozen) |
+| F3/LR1 | `LR1.yaml` | Full unfreeze, 10:1 LR ratio (**BASELINE**) |
+| LR2 | `LR2.yaml` | Full unfreeze, 100:1 |
+| LR3 | `LR3.yaml` | Full unfreeze, 3:1 |
+| LR4 | `LR4.yaml` | Full unfreeze, 1:1 uniform |
+| A1 | `A1_deep_query_off.yaml` | Shallow query (proves deep query essential) |
+| A6 | `A6_coarse_only.yaml` | No fine pass (proves foveation helps) |
+| B1 | `B1_multi_token.yaml` | 16 tok/frame baseline (efficiency comparison) |
+| A8a | `A8_static_1frame.yaml` | Image with 1 frame (control) |
+| A8b | `A8_static_16frames.yaml` | Image replicated to 16 frames |
+| D1 | `D1_video_heavy.yaml` | 55% video / 30% image / 15% text |
 
-## Model Paths
+**Execution order**: F1+F2+LR1 first → analyze → LR2+LR3+LR4+A1 → A6+B1+A8a+A8b+D1
 
-| Model | Path |
-|-------|------|
-| SmolLM2-135M-Instruct | `/workspace/models/SmolLM2-135M-Instruct` |
-| SmolLM2-360M-Instruct | `/workspace/models/SmolLM2-360M-Instruct` |
-| SmolLM2-1.7B-Instruct | `/workspace/models/SmolLM2-1.7B-Instruct` |
-| DINOv2-small | `/workspace/models/dinov2-small` |
-| DINOv2-base | `/workspace/models/dinov2-base` |
-| SmolVLM2-256M (eval) | `/workspace/models/SmolVLM2-256M-Video-Instruct` |
-| SmolVLM2-2.2B (eval) | `/workspace/models/SmolVLM2-2.2B-Instruct` |
+**Ignore these legacy configs**: `baseline.yaml`, `A2_*`, `A3_*`, `A4_*`, `A5_*`, `A8_static_8frames.yaml`, `T1_*`, `T2_*`, `T3_*`
 
----
+## Data (all at /workspace/data/)
 
-## Architecture Quick Reference
+| Dataset | Path | Shards | Samples |
+|---------|------|--------|---------|
+| OpenVid-1M (video) | `openvid/*.tar` | 905 | 905K |
+| Cauldron (image QA) | `cauldron_full/*.tar` | 2,001 | 2.0M |
+| SmolTalk (text, 3 stages) | `text_retention/stage{1,2,3}/*.tar` | 490 | 490K |
+| Eval | `eval/val_10k/*.tar` | 10 | 10K |
+| Total across all sources | | 4,554 | 4.53M |
 
-**Core idea:** 1 token/frame via query-guided cross-attention on DINOv2 features.
+## Models (at /workspace/models/)
 
-**Two-pass training (parallel approximation):**
-1. Coarse: q_static → all frames → z_coarse → LLM → dynamic queries
-2. Fine: shifted queries → all frames → z_fine → LLM + text → loss
+- `SmolLM2-135M-Instruct`, `SmolLM2-360M-Instruct`, `SmolLM2-1.7B-Instruct`
+- `dinov2-small`, `dinov2-base`
 
-**Three eval modes:**
-- `coarse_only` — fastest, single static-query pass
-- `coarse_fine` — matches training (two parallel passes)
-- `autoregressive` — true sequential inference with KV cache
+## Key Architecture Decisions
 
-**Train/inference gap < 0.6%** — parallel approximation is valid.
+- Loss: Stage 1 = all-text CE, Stage 2-3 = answer-only CE
+- 14% SmolTalk text retention in ALL stages
+- deep_query=True, query_dim=384, bias=False, std=1.0 init
+- No reconstruction loss, no VAE, no DoRA
 
----
+## Environment
 
-## Key Decisions (DO NOT CHANGE without discussion)
+- **Cache redirect**: Source `/workspace/.bashrc_runpod` to redirect HF/torch caches to /workspace (system disk is only 5GB)
+- **Disk**: ~506GB used of 1TB quota (`df -h` shows 1.7PB but actual quota is 1TB)
+- **No root**: Can't apt install
 
-### Loss Masking
-- **Stage 1 (WebVid captioning):** Loss on ALL text tokens (prompt + caption)
-- **Stage 2-3 (SFT):** Loss on ANSWER tokens only (mask user prompts)
-- **Visual tokens:** NEVER have loss (DINO features, not predicted text)
-- **SmolTalk retention:** Follows same loss rule as the stage it's in
+## Critical Bugs (already fixed in release/ code)
 
-### Architecture Settings
-- `deep_query=True` (shallow = uniform attention — BUG-004)
-- `query_dim=384`, `bias=False` on query_input_proj (BUG-002)
-- `q_static`/`q_init` init with `std=1.0` (BUG-001)
-- Mode selection per-batch, not per-sample (BUG-003)
+- BUG-001: Query init must be std=1.0 (not 0.02) — uniform attention otherwise
+- BUG-002: query_input_proj must have bias=False — bias dominates small queries
+- BUG-004: Must use deep_query=True — shallow gives uniform attention (correlation ~0.98)
 
-### Training
-- No reconstruction loss, no VAE — text CE only
-- Full weight fine-tuning (no DoRA/LoRA)
-- Differential LR: connector (1e-4) > LLM (1e-5) > DINO (1e-5)
-- 14% SmolTalk in ALL stages
-- 1 FPS, variable frames 1-64, cap at 64 (matches SmolVLM2)
-- Frame size 224x224 (DINOv2 native, NOT 384 like SigLIP)
-
-### Prompt Format
-- Stage 1: `<|user|>What would be the WebVid caption for this video?<|end|><|assistant|>{caption}<|end|>`
-- Stage 2-3: Datasets have instruction format, use as-is
-
----
-
-## Key Data Decisions (2026-02-12)
-
-- **WebVid-10M is dead.** All Shutterstock URLs return HTML error pages. Replaced with OpenVid-1M.
-- **Use SmolVLM2's actual training datasets** (LLaVA-Video-178K, FineVideo, Vript, M4-Instruct) for Stage 3 — apples-to-apples comparison.
-- **Static Frame Replication (Ablation A8):** Image data (Cauldron) should be replicated to N frames to create "still videos." Proposed: 16 frames. Rationale: exercises temporal pipeline, avoids train distribution mismatch between 1-frame images and 5-64 frame videos. Needs ablation: 1 vs 8 vs 16.
-
----
+These are baked into the code. Listed here so you don't accidentally reintroduce them.
 
 ## Debugging Checklist
 
-When `loss_fine == loss_coarse` (or ratio stays at 1.0):
+**When `loss_fine == loss_coarse` (ratio stays at 1.0):**
+1. `model.q_static.std()` should be ~1.0 (not ~0.02)
+2. Attention entropy high (near log N) = uniform attention = BAD
+3. `(embed_q1 - embed_q2).abs().mean()` should be > 0.5
+4. Verify `deep_query=True` in config
+5. Mode selection must be per-batch, NOT per-sample
 
-1. **Query init scale:** `model.q_static.std()` should be ~1.0
-2. **Attention entropy:** High (near log N) = uniform = BAD
-3. **Embedding difference:** `(embed_q1 - embed_q2).abs().mean()` should be > 0.5
-4. **Per-batch mode selection:** NOT per-sample
-5. **deep_query=True:** Shallow mode → uniform attention
+**When loss is NaN or exploding:**
+1. Gradient norm should be < 10 after clipping
+2. Connector LR shouldn't exceed 1e-3
+3. visual_scale should match LLM embedding std (~0.14)
 
-When loss is NaN or exploding:
-1. Check gradient norm (should be < 10 after clipping)
-2. Check learning rates (connector shouldn't be > 1e-3)
-3. Check visual_scale (should match LLM embedding std ~0.14)
+## Communication
 
----
+- **Comms board**: `/workspace/comms/BOARD.md` — append-only, timestamped, `LOCAL` vs `RUNPOD` tags
+- **Git**: Push after each logical change. LOCAL Claude pulls regularly.
+- **wandb**: `foveated-vlm-ablations` (Phase 1a), `foveated-vlm-scaling` (Phase 1b)
 
-## Critical References
+## Reference Docs
 
-| Document | Purpose |
-|----------|---------|
-| `core_docs/foveated_vlm_proposal.md` | Architecture specification |
-| `docs/KNOWLEDGE.md` | Bugs, fixes, experiments, insights, dataset inventory |
-| `docs/SCALING_PLAN.md` | 3-stage training plan, scaling study |
-| `docs/GPU_PHASE1_PLAN.md` | Ablation sweeps for GPU Phase 1 |
-| `docs/runpod/BRIEFING.md` | Full project context for fresh invocations |
+| Doc | Purpose |
+|-----|---------|
+| `docs/GPU_PHASE1_PLAN.md` | Ablation + scaling grid plan, metrics, decision framework |
+| `docs/runpod/BRIEFING.md` | Full project context for fresh GPU Claude |
+| `docs/runpod/GPU_HANDOFF.md` | Config mapping, execution order |
+| `docs/KNOWLEDGE.md` | Bugs, experiments, dataset inventory |
+| `docs/SCALING_PLAN.md` | 3-stage training plan |
 | `docs/runpod/SMOLVLM2_REFERENCE.md` | SmolVLM2 training details |
-| `docs/RESEARCH_PLAYBOOK.md` | Research methodology |
-| `docs/legacy/` | Old reconstruction-era docs (reference only) |
-
----
-
-*Last updated: 2026-02-14*
+| `core_docs/foveated_vlm_proposal.md` | Architecture specification |
