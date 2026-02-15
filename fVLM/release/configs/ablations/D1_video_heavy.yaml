@@ -1,16 +1,16 @@
 # =============================================================================
-# Ablation A2: Smaller Query Dimension (192)
+# Ablation D1: Video-Heavy Data Mix
 # =============================================================================
-# Tests whether the query needs full 384 dimensions or can work with less.
+# 55% video / 30% image / 15% text
+# Default baseline mix is roughly 40% video / 45% image / 15% text.
 #
 # Change from baseline:
-#   query_dim: 384 --> query_dim: 192
+#   data mix adjusted to be video-heavy (more OpenVid, more Vript)
 #
-# With query_dim=192, the cross-attention has half the capacity to represent
-# what to attend to.  If performance is similar, we can save compute on the
-# query pathway.  If it drops significantly, query expressiveness matters.
+# Tests whether higher video ratio improves video understanding.  Trade-off:
+# less image QA data could hurt image benchmarks.
 #
-# Expected runtime: ~2h on 2xA100-80GB
+# Expected runtime: ~5h on 2xA100-80GB
 # =============================================================================
 
 stage: 1
@@ -19,13 +19,16 @@ model:
   llm: /workspace/models/SmolLM2-135M-Instruct
   dino: /workspace/models/dinov2-small
   deep_query: true
-  query_dim: 192              # <-- ABLATION: half of baseline 384
+  query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
   gradient_checkpointing: false
 
 data:
-  train_shards: "/workspace/data/openvid/*.tar"
+  train_shards:
+    - "/workspace/data/openvid/*.tar"
+    - "/workspace/data/vript_long_shards/*.tar"
+    - "/workspace/data/sharegpt4video/*.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
   text_shards: "/workspace/data/text_retention/stage1/*.tar"
   text_ratio: 0.14
@@ -52,7 +55,7 @@ loss:
   type: text_ce_all
 
 checkpoint:
-  save_dir: /workspace/checkpoints/ablations/A2_query_dim_192
+  save_dir: /workspace/checkpoints/ablations/D1_video_heavy
   save_every_steps: 500
   keep_last: 2
   keep_best: 1
@@ -65,4 +68,4 @@ eval:
 
 wandb:
   project: foveated-vlm-ablations
-  run_name: A2_query_dim_192
+  run_name: D1_video_heavy

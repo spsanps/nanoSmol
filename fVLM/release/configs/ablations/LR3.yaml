@@ -1,23 +1,16 @@
 # =============================================================================
-# Ablation LR3: 50x/10x Ratio (High Connector, Medium Backbone)
+# Ablation LR3: 3:1 Near-Uniform LR
 # =============================================================================
-# connector=5e-4, dino=1e-5, llm=5e-5
-# Connector:DINO ratio = 50:1, Connector:LLM ratio = 10:1
+# connector=3e-5, dino=1e-5, llm=1e-5
+# Connector:backbone ratio = 3:1
 #
 # Change from baseline:
-#   lr_connector: 1e-4  -->  5e-4
-#   lr_llm:       1e-5  -->  5e-5
+#   lr_connector: 1e-4  -->  3e-5
 #
-# Hypothesis: The connector may benefit from an even more aggressive
-# learning rate.  At 5e-4, the randomly-initialized projections and query
-# parameters can establish alignment with the pretrained embeddings faster.
-# The LLM gets a modest 5x bump to help it adapt to visual tokens.
-# DINO stays at 1e-5 (same as baseline).
+# Tests whether even a slight LR differential matters.  If LR3 ≈ LR4 (uniform),
+# even a 3x ratio doesn't help.  If LR3 > LR4, some differential is beneficial.
 #
-# Risk: 5e-4 for the connector may be unstable.  Watch for loss spikes
-# and gradient norm explosions in the first 1K steps.
-#
-# Expected runtime: ~2h on 2xA100-80GB
+# Expected runtime: ~5h on 2xA100-80GB
 # =============================================================================
 
 stage: 1
@@ -41,12 +34,12 @@ data:
   num_workers: 4
 
 training:
-  total_samples: 360_000
+  total_samples: 1_000_000
   batch_size: 16
   grad_accum: 2
-  lr_connector: 5.0e-4    # <-- ABLATION: 5x higher than baseline
+  lr_connector: 3.0e-5    # <-- ABLATION: 3:1 ratio (near-uniform)
   lr_dino: 1.0e-5
-  lr_llm: 5.0e-5          # <-- ABLATION: 5x higher than baseline
+  lr_llm: 1.0e-5
   warmup_ratio: 0.05
   weight_decay: 0.01
   max_grad_norm: 1.0
@@ -72,4 +65,4 @@ eval:
 
 wandb:
   project: foveated-vlm-ablations
-  run_name: LR3_50x_10x_ratio
+  run_name: LR3_3x_ratio

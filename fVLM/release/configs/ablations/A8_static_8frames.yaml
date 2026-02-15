@@ -40,7 +40,7 @@ data:
   replicate_image_frames: 8     # <-- ABLATION: replicate images to 8 frames
 
 training:
-  total_samples: 360_000
+  total_samples: 1_000_000
   batch_size: 16
   grad_accum: 2
   lr_connector: 1.0e-4

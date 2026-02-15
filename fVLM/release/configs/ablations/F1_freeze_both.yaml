@@ -1,16 +1,18 @@
 # =============================================================================
-# Ablation A2: Smaller Query Dimension (192)
+# Ablation F1: Freeze Both (Connector Only Training)
 # =============================================================================
-# Tests whether the query needs full 384 dimensions or can work with less.
+# freeze_dino: true, freeze_llm: true
+# Only the connector (dino_to_llm, llm_to_query, q_static, q_init) is trained.
 #
 # Change from baseline:
-#   query_dim: 384 --> query_dim: 192
+#   freeze_dino: false  -->  true
+#   freeze_llm:  false  -->  true
 #
-# With query_dim=192, the cross-attention has half the capacity to represent
-# what to attend to.  If performance is similar, we can save compute on the
-# query pathway.  If it drops significantly, query expressiveness matters.
+# Tests the minimal training scenario: can the connector alone bridge DINO
+# and LLM?  If F1 ≈ F3 (baseline), backbone unfreezing is unnecessary.
+# If significantly worse, backbone adaptation is required.
 #
-# Expected runtime: ~2h on 2xA100-80GB
+# Expected runtime: ~3h on 2xA100-80GB (faster -- no backbone gradients)
 # =============================================================================
 
 stage: 1
@@ -19,9 +21,11 @@ model:
   llm: /workspace/models/SmolLM2-135M-Instruct
   dino: /workspace/models/dinov2-small
   deep_query: true
-  query_dim: 192              # <-- ABLATION: half of baseline 384
+  query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
+  freeze_dino: true              # <-- ABLATION: DINO frozen
+  freeze_llm: true               # <-- ABLATION: LLM frozen
   gradient_checkpointing: false
 
 data:
@@ -52,7 +56,7 @@ loss:
   type: text_ce_all
 
 checkpoint:
-  save_dir: /workspace/checkpoints/ablations/A2_query_dim_192
+  save_dir: /workspace/checkpoints/ablations/F1_freeze_both
   save_every_steps: 500
   keep_last: 2
   keep_best: 1
@@ -65,4 +69,4 @@ eval:
 
 wandb:
   project: foveated-vlm-ablations
-  run_name: A2_query_dim_192
+  run_name: F1_freeze_both

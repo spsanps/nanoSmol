@@ -14,7 +14,7 @@
 # Expected runtime: ~3h on 2xA100-80GB (more tokens per image sample)
 # =============================================================================
 
-stage: 1
+stage: 2
 
 model:
   llm: /workspace/models/SmolLM2-135M-Instruct
@@ -26,9 +26,9 @@ model:
   gradient_checkpointing: false
 
 data:
-  train_shards: "/workspace/data/openvid/*.tar"
+  train_shards: "/workspace/data/cauldron_full/*.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
-  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_shards: "/workspace/data/text_retention/stage2/*.tar"
   text_ratio: 0.14
   max_frames: 64
   frame_size: 224
@@ -36,7 +36,7 @@ data:
   replicate_image_frames: 16    # <-- ABLATION: replicate images to 16 frames
 
 training:
-  total_samples: 360_000
+  total_samples: 1_000_000
   batch_size: 16
   grad_accum: 2
   lr_connector: 1.0e-4
@@ -51,7 +51,7 @@ training:
   seed: 42
 
 loss:
-  type: text_ce_all
+  type: text_ce_answer_only
 
 checkpoint:
   save_dir: /workspace/checkpoints/ablations/A8_static_16frames

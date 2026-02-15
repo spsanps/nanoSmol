@@ -84,7 +84,22 @@ def build_model(cfg: dict, device: torch.device):
     if cfg["model"].get("gradient_checkpointing", False):
         model.enable_gradient_checkpointing()
 
-    return model.to(device)
+    model = model.to(device)
+
+    # ---- Freeze parameters based on config ----
+    if cfg["model"].get("freeze_dino", False):
+        for p in model.encoder.dino.parameters():
+            p.requires_grad = False
+        if is_main_process():
+            print("  Frozen: DINO encoder")
+
+    if cfg["model"].get("freeze_llm", False):
+        for p in model.llm.parameters():
+            p.requires_grad = False
+        if is_main_process():
+            print("  Frozen: LLM backbone")
+
+    return model
 
 
 def _get_tokenizer(cfg: dict):
@@ -165,6 +180,7 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg):
     total_loss = 0.0
     count = 0
     max_samples = cfg.get("eval", {}).get("max_samples", 1000)
+    eval_mode = "coarse_only" if cfg["model"].get("coarse_only", False) else "coarse_fine"
 
     for batch in val_loader:
         if count >= max_samples:
@@ -181,7 +197,7 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg):
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 loss_mask=batch["loss_mask"],
-                mode="coarse_fine",
+                mode=eval_mode,
             )
 
         bs = batch["frames"].shape[0]
@@ -316,6 +332,9 @@ def train(cfg: dict, args):
     save_every = cfg["checkpoint"].get("save_every_steps", 1000)
     eval_every = cfg.get("eval", {}).get("every_steps", 500)
     log_every = 10
+    train_mode = "coarse_only" if cfg["model"].get("coarse_only", False) else "coarse_fine"
+    if is_main_process() and train_mode != "coarse_fine":
+        print(f"  Train mode: {train_mode}")
 
     global_step = start_step
     samples_seen = data_position
@@ -351,7 +370,7 @@ def train(cfg: dict, args):
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         loss_mask=batch["loss_mask"],
-                        mode="coarse_fine",
+                        mode=train_mode,
                     )
                     loss = outputs["loss"] / grad_accum
 

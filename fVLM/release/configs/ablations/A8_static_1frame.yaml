@@ -1,37 +1,37 @@
 # =============================================================================
-# Ablation A2: Smaller Query Dimension (192)
+# Ablation A8a: Static Frame (1 frame, no replication)
 # =============================================================================
-# Tests whether the query needs full 384 dimensions or can work with less.
+# Images enter as single frames — no temporal replication.
+# This is the control for A8b (16-frame replication).
 #
 # Change from baseline:
-#   query_dim: 384 --> query_dim: 192
+#   replicate_image_frames: 1  (same as default, explicit)
+#   stage: 2                   (answer-only loss for image QA)
+#   data: Cauldron-heavy       (image QA data)
 #
-# With query_dim=192, the cross-attention has half the capacity to represent
-# what to attend to.  If performance is similar, we can save compute on the
-# query pathway.  If it drops significantly, query expressiveness matters.
-#
-# Expected runtime: ~2h on 2xA100-80GB
+# Expected runtime: ~5h on 2xA100-80GB
 # =============================================================================
 
-stage: 1
+stage: 2
 
 model:
   llm: /workspace/models/SmolLM2-135M-Instruct
   dino: /workspace/models/dinov2-small
   deep_query: true
-  query_dim: 192              # <-- ABLATION: half of baseline 384
+  query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
   gradient_checkpointing: false
 
 data:
-  train_shards: "/workspace/data/openvid/*.tar"
+  train_shards: "/workspace/data/cauldron_full/*.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
-  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_shards: "/workspace/data/text_retention/stage2/*.tar"
   text_ratio: 0.14
   max_frames: 64
   frame_size: 224
   num_workers: 4
+  replicate_image_frames: 1      # <-- ABLATION: no replication (control)
 
 training:
   total_samples: 1_000_000
@@ -49,10 +49,10 @@ training:
   seed: 42
 
 loss:
-  type: text_ce_all
+  type: text_ce_answer_only
 
 checkpoint:
-  save_dir: /workspace/checkpoints/ablations/A2_query_dim_192
+  save_dir: /workspace/checkpoints/ablations/A8_static_1frame
   save_every_steps: 500
   keep_last: 2
   keep_best: 1
@@ -65,4 +65,4 @@ eval:
 
 wandb:
   project: foveated-vlm-ablations
-  run_name: A2_query_dim_192
+  run_name: A8_static_1frame

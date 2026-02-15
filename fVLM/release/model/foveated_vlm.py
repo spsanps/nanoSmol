@@ -337,7 +337,6 @@ class FoveatedVLM(nn.Module):
     # Forward mode 2: Coarse only (FAST EVAL)
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
     def forward_coarse_only(
         self,
         frames: torch.Tensor,
@@ -346,9 +345,13 @@ class FoveatedVLM(nn.Module):
         loss_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Single-pass coarse evaluation (no fine queries).
+        Single-pass coarse forward (q_static only, no fine queries).
 
-        Fastest mode: q_static -> all frames -> z_coarse -> LLM -> logits.
+        Used for:
+          - Training A6 ablation (coarse-only training)
+          - Fast eval (wrap in torch.no_grad() externally)
+
+        q_static -> all frames -> z_coarse -> LLM -> logits.
 
         Parameters
         ----------
@@ -402,7 +405,10 @@ class FoveatedVLM(nn.Module):
             else:
                 full_loss_mask = None
 
-            result["loss"] = self._ce_loss(logits, full_labels, full_loss_mask)
+            loss = self._ce_loss(logits, full_labels, full_loss_mask)
+            result["loss"] = loss
+            result["coarse_loss"] = loss
+            result["fine_loss"] = torch.tensor(0.0, device=frames.device)
 
         return result
 

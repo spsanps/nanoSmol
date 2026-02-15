@@ -1,22 +1,17 @@
 # =============================================================================
-# Ablation LR2: 100x LR Ratio (High Connector, Very Low DINO)
+# Ablation LR2: 100:1 Aggressive Connector LR
 # =============================================================================
-# connector=1e-4, dino=1e-6, llm=1e-5
-# Connector:DINO ratio = 100:1, Connector:LLM ratio = 10:1
+# connector=1e-3, dino=1e-5, llm=1e-5
+# Connector:backbone ratio = 100:1
 #
 # Change from baseline:
-#   lr_dino: 1e-5  -->  lr_dino: 1e-6
+#   lr_connector: 1e-4  -->  lr_connector: 1e-3
 #
-# Hypothesis: DINO is well-pretrained for visual feature extraction and may
-# not need much adaptation for the foveated query mechanism.  The cross-
-# attention query pathway (connector) does most of the "learning to look"
-# work.  Keeping DINO nearly frozen could reduce catastrophic forgetting
-# of its patch-level representations.
+# Tests whether a much higher connector LR helps the query mechanism learn
+# faster while keeping backbones stable.  If this diverges, 1e-3 is too
+# aggressive.  If it matches or beats LR1, we can push the connector harder.
 #
-# If this matches or beats LR1, DINO fine-tuning is not critical and we
-# can save memory by freezing it in later stages.
-#
-# Expected runtime: ~2h on 2xA100-80GB
+# Expected runtime: ~5h on 2xA100-80GB
 # =============================================================================
 
 stage: 1
@@ -40,11 +35,11 @@ data:
   num_workers: 4
 
 training:
-  total_samples: 360_000
+  total_samples: 1_000_000
   batch_size: 16
   grad_accum: 2
-  lr_connector: 1.0e-4    # <-- 100x ratio to DINO
-  lr_dino: 1.0e-6         # <-- ABLATION: 10x lower than baseline
+  lr_connector: 1.0e-3    # <-- ABLATION: 100:1 ratio (aggressive connector)
+  lr_dino: 1.0e-5
   lr_llm: 1.0e-5
   warmup_ratio: 0.05
   weight_decay: 0.01

@@ -148,25 +148,47 @@ def decode_sample(sample: dict, max_frames: int = 64,
 
     # On-the-fly tokenization if pre-tokenized data is missing
     if token_ids is None or loss_mask is None:
-        caption = meta.get("caption", "")
-        # Also check .txt key (video2dataset stores caption as separate file)
-        if not caption:
-            txt_raw = sample.get("txt")
-            if isinstance(txt_raw, bytes):
-                caption = txt_raw.decode("utf-8", errors="replace").strip()
-            elif isinstance(txt_raw, str):
-                caption = txt_raw.strip()
+        from release.scripts.precompute import tokenize_stage1, tokenize_sft
 
-        if not caption or tokenizer is None:
+        # Unified format: user/assistant keys
+        user_text = meta.get("user", "")
+        assistant_text = meta.get("assistant", "")
+
+        if user_text or assistant_text:
+            # Has structured user/assistant format
+            if stage == 1:
+                # Stage 1: all-text loss. Combine user+assistant as caption.
+                caption = f"{user_text} {assistant_text}".strip() if user_text else assistant_text
+                tok = tokenize_stage1(caption, tokenizer=tokenizer)
+            else:
+                # Stage 2-3: answer-only loss on assistant portion
+                tok = tokenize_sft(
+                    user_text or "Describe this.",
+                    assistant_text,
+                    stage=stage,
+                    tokenizer=tokenizer,
+                )
+        else:
+            # Legacy format: caption key or .txt file
+            caption = meta.get("caption", "")
+            if not caption:
+                txt_raw = sample.get("txt")
+                if isinstance(txt_raw, bytes):
+                    caption = txt_raw.decode("utf-8", errors="replace").strip()
+                elif isinstance(txt_raw, str):
+                    caption = txt_raw.strip()
+
+            if not caption or tokenizer is None:
+                return None
+
+            if stage == 1:
+                tok = tokenize_stage1(caption, tokenizer=tokenizer)
+            else:
+                tok = tokenize_sft("Describe this.", caption, stage=stage, tokenizer=tokenizer)
+
+        if tokenizer is None:
             return None
 
-        # Tokenize on-the-fly
-        from release.scripts.precompute import tokenize_stage1, tokenize_sft
-        if stage == 1:
-            tok = tokenize_stage1(caption, tokenizer=tokenizer)
-        else:
-            # For stage 2-3, caption is used as assistant response
-            tok = tokenize_sft("Describe this.", caption, stage=stage, tokenizer=tokenizer)
         token_ids = tok["token_ids"]
         loss_mask = tok["loss_mask"]
 
