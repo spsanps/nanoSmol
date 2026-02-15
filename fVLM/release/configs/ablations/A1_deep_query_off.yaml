@@ -50,7 +50,7 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: true
+  compile: false
   seed: 42
 
 loss:

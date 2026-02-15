@@ -614,8 +614,10 @@ class FoveatedVLM(nn.Module):
     # ------------------------------------------------------------------
 
     def enable_gradient_checkpointing(self) -> None:
-        """Turn on activation checkpointing for the LLM backbone."""
+        """Turn on activation checkpointing for LLM and DINO."""
         self.llm.gradient_checkpointing_enable()
+        if hasattr(self.encoder.dino, 'gradient_checkpointing_enable'):
+            self.encoder.dino.gradient_checkpointing_enable()
 
     def get_param_groups(
         self,

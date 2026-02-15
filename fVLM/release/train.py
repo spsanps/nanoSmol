@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import gc
 import os
 import sys
 import time
@@ -26,6 +27,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # TF32 for free speedup on Ampere+ GPUs (RTX 3090, A100, RTX 5090, etc.)
 torch.set_float32_matmul_precision("high")
+
+# nanochat: expandable segments for GPU memory allocator
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # Ensure release/ is importable when run from repo root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -184,7 +188,7 @@ def build_val_loader(cfg: dict):
         batch_size=cfg["training"]["batch_size"],
         max_frames=cfg["data"].get("max_frames", 64),
         shuffle=False,
-        num_workers=max(1, cfg["data"].get("num_workers", 4) // 2),
+        num_workers=2,  # val has few shards; keep low to avoid empty-worker crashes
         tokenizer=tokenizer,
         stage=stage,
     )
@@ -302,6 +306,13 @@ def train(cfg: dict, args):
 
     raw_model = model.module if hasattr(model, "module") else model
 
+    # ---- Gradient checkpointing (nanochat: trade compute for memory) ----
+    if cfg["model"].get("gradient_checkpointing", False):
+        if hasattr(raw_model, "enable_gradient_checkpointing"):
+            raw_model.enable_gradient_checkpointing()
+            if is_main_process():
+                print("  Gradient checkpointing: enabled")
+
     # ---- Optimizer (differential LR) ----
     param_groups = raw_model.get_param_groups(
         lr_backbone=cfg["training"].get("lr_dino", 1e-5),
@@ -317,6 +328,7 @@ def train(cfg: dict, args):
     optimizer = torch.optim.AdamW(
         param_groups,
         weight_decay=cfg["training"].get("weight_decay", 0.01),
+        fused=True,  # nanochat: fused kernel eliminates Python overhead
     )
 
     # ---- Schedule ----
@@ -413,7 +425,11 @@ def train(cfg: dict, args):
     micro_step = 0
 
     model.train()
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)  # nanochat: faster than setting to zero
+
+    # nanochat: disable GC during training — saves ~500ms per collection
+    gc.collect()
+    gc.disable()
 
     t0 = time.time()
 
@@ -463,7 +479,7 @@ def train(cfg: dict, args):
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # nanochat: faster
             global_step += 1
 
             # ---- Logging ----
