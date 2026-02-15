@@ -63,7 +63,7 @@ class FoveatedVLM(nn.Module):
 
         # ---- Language model ----
         self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_name, attn_implementation="sdpa", dtype=torch.float32,
+            llm_name, attn_implementation="sdpa", torch_dtype=torch.float32,
         )
         self.llm.config.use_cache = False  # training default; overridden per-method
         llm_dim = self.llm.config.hidden_size
@@ -311,7 +311,7 @@ class FoveatedVLM(nn.Module):
             full_loss_mask = torch.cat([visual_no_loss, loss_mask], dim=1)  # [B,T+S]
         else:
             # Default: compute loss on all text positions that are not padding
-            visual_no_loss = torch.zeros(B, T, dtype=torch.long, device=frames.device)
+            visual_no_loss = torch.zeros(B, T, dtype=attention_mask.dtype, device=attention_mask.device)
             text_loss_mask = attention_mask  # non-pad text positions
             full_loss_mask = torch.cat([visual_no_loss, text_loss_mask], dim=1)
 

@@ -53,7 +53,7 @@ class MultiTokenVLM(nn.Module):
 
         # ---- Language model ----
         self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_name, attn_implementation="sdpa", dtype=torch.float32,
+            llm_name, attn_implementation="sdpa", torch_dtype=torch.float32,
         )
         self.llm.config.use_cache = False
         llm_dim = self.llm.config.hidden_size
@@ -189,7 +189,7 @@ class MultiTokenVLM(nn.Module):
             )
             full_loss_mask = torch.cat([visual_no_loss, loss_mask], dim=1)
         else:
-            visual_no_loss = torch.zeros(B, V_tokens, dtype=torch.long, device=frames.device)
+            visual_no_loss = torch.zeros(B, V_tokens, dtype=attention_mask.dtype, device=attention_mask.device)
             full_loss_mask = torch.cat([visual_no_loss, attention_mask], dim=1)
 
         loss = self._ce_loss(logits, full_labels, full_loss_mask)
