@@ -336,14 +336,19 @@ def create_webdataset(
     """
     effective_seed = seed + epoch
 
-    # Resolve shard_pattern: can be a string glob or a list of globs.
+    # Resolve shard_pattern: can be a string glob, brace-expansion, or a list of globs.
+    # webdataset handles brace-expansion ({0000..0999}.tar) but NOT shell globs (*.tar).
+    import glob as globmod
     if isinstance(shard_pattern, list):
-        import glob as globmod
         urls = []
         for pat in shard_pattern:
             urls.extend(sorted(globmod.glob(pat)))
         if not urls:
             raise ValueError(f"No shards found for patterns: {shard_pattern}")
+    elif '*' in shard_pattern or '?' in shard_pattern:
+        urls = sorted(globmod.glob(shard_pattern))
+        if not urls:
+            raise ValueError(f"No shards found for pattern: {shard_pattern}")
     else:
         urls = shard_pattern
 

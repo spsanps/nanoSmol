@@ -147,7 +147,8 @@ class FoveatedEncoder(nn.Module):
 
             # Full forward for the patch tokens (self-attention + FFN).
             # Patches attend to patches only -- the query is not present yet.
-            hidden = layer(hidden)
+            layer_out = layer(hidden)
+            hidden = layer_out[0] if isinstance(layer_out, tuple) else layer_out
 
         # Final layer norm (matches Dinov2Model.forward).
         patch_features = self.dino.layernorm(hidden)  # [B*T, N+1, D]
