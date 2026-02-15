@@ -387,7 +387,7 @@ def make_dataloader(
     num_workers: int = 4,
     collate_fn=None,
     pin_memory: bool = True,
-    prefetch_factor: int = 2,
+    prefetch_factor: int = 4,
     tokenizer=None,
     stage: int = 1,
     replicate_image_frames: int = 1,

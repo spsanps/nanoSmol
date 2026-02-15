@@ -205,13 +205,15 @@ class FoveatedEncoder(nn.Module):
 
             # Scaled dot-product attention (query attends to all patches).
             # Q: [B, H, 1, d],  K_h: [B, H, N+1, d],  V_h: [B, H, N+1, d]
-            attn_scores = torch.matmul(Q, K_h.transpose(-2, -1)) * self.attn_scale
-            attn_weights = F.softmax(attn_scores, dim=-1)  # [B, H, 1, N+1]
-
             if return_attention:
+                # Manual path: need explicit weights for visualization
+                attn_scores = torch.matmul(Q, K_h.transpose(-2, -1)) * self.attn_scale
+                attn_weights = F.softmax(attn_scores, dim=-1)
                 all_attn_weights.append(attn_weights.detach())
-
-            attn_out = torch.matmul(attn_weights, V_h)     # [B, H, 1, d]
+                attn_out = torch.matmul(attn_weights, V_h)
+            else:
+                # SDPA: fused kernel, no intermediate allocations
+                attn_out = F.scaled_dot_product_attention(Q, K_h, V_h)
 
             # Merge heads:  [B, H, 1, d] -> [B, 1, D]
             attn_out = attn_out.transpose(1, 2).contiguous().view(B, 1, self.dino_dim)

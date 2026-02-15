@@ -117,103 +117,158 @@ class FoveatedVLM(nn.Module):
         h = h * self.visual_scale                      # match LLM embedding magnitude
         return h
 
+    # Maximum frames per DINO encode/query call to prevent OOM on large batches.
+    _MAX_ENCODE_CHUNK = 200
+
     def _encode_all_frames(self, frames: torch.Tensor, frame_mask=None):
         """
         Run DINO patch encoding for every frame in the batch.
 
         frames     : [B, T, 3, 224, 224]
         frame_mask : [B, T] bool — True for real frames, False for padding.
-                     If None, all frames are encoded (legacy behavior).
-        Returns list[T] of per-frame kv_cache lists (one (K,V) tuple per layer).
+
+        Returns (kv_cache, mask_flat):
+            kv_cache  : list of (K, V) per layer, each [n_real, N+1, D]
+                        (compact — only real frames, no padding waste).
+            mask_flat : [B*T] bool tensor or None. Used to scatter results back.
         """
         B, T, C, H, W = frames.shape
-        frames_flat = frames.reshape(B * T, C, H, W)
+        BT = B * T
+        frames_flat = frames.reshape(BT, C, H, W)
 
-        # --- Optimization: skip padded frames through DINO ---
         if frame_mask is not None:
-            mask_flat = frame_mask.reshape(B * T)
+            mask_flat = frame_mask.reshape(BT)
             n_real = mask_flat.sum().item()
         else:
             mask_flat = None
-            n_real = B * T
+            n_real = BT
 
-        if mask_flat is not None and n_real < B * T:
-            # Encode only real frames
-            real_frames = frames_flat[mask_flat]                  # [n_real, C, H, W]
-            _, kv_cache_real = self.encoder.encode_patches(real_frames)
+        if mask_flat is not None and n_real < BT:
+            real_frames = frames_flat[mask_flat]          # [n_real, C, H, W]
+        else:
+            real_frames = frames_flat
 
-            # Scatter into full-size caches with zeros for padding
-            N1 = kv_cache_real[0][0].shape[1]
-            D = kv_cache_real[0][0].shape[2]
-            kv_cache_flat = []
-            for K_real, V_real in kv_cache_real:
+        # Chunked encoding to prevent OOM on batches with many real frames
+        if real_frames.shape[0] <= self._MAX_ENCODE_CHUNK:
+            _, kv_cache = self.encoder.encode_patches(real_frames)
+        else:
+            kv_chunks = []
+            for start in range(0, real_frames.shape[0], self._MAX_ENCODE_CHUNK):
+                _, kv_chunk = self.encoder.encode_patches(
+                    real_frames[start:start + self._MAX_ENCODE_CHUNK]
+                )
+                kv_chunks.append(kv_chunk)
+            kv_cache = [
+                (torch.cat([c[li][0] for c in kv_chunks], dim=0),
+                 torch.cat([c[li][1] for c in kv_chunks], dim=0))
+                for li in range(len(kv_chunks[0]))
+            ]
+
+        return kv_cache, mask_flat
+
+    def _batched_query_attend(self, queries: torch.Tensor, kv_cache: list) -> torch.Tensor:
+        """Chunked query_attend to prevent OOM on large batches."""
+        n = queries.shape[0]
+        if n <= self._MAX_ENCODE_CHUNK:
+            return self.encoder.query_attend(queries, kv_cache)
+        chunks = []
+        for start in range(0, n, self._MAX_ENCODE_CHUNK):
+            end = min(start + self._MAX_ENCODE_CHUNK, n)
+            kv_slice = [(K[start:end], V[start:end]) for K, V in kv_cache]
+            chunks.append(self.encoder.query_attend(queries[start:end], kv_slice))
+        return torch.cat(chunks, dim=0)
+
+    def _query_all_frames(
+        self, query: torch.Tensor, kv_cache: list,
+        B: int, T: int, mask_flat=None,
+    ) -> torch.Tensor:
+        """
+        Apply a single query to every frame in ONE batched query_attend call.
+
+        query     : [B, query_dim]
+        kv_cache  : list of (K, V) per layer, each [n_real, N+1, D]
+        B, T      : batch and temporal dimensions
+        mask_flat : [B*T] bool or None
+        Returns   : [B, T, dino_dim]
+        """
+        BT = B * T
+        dd = self.encoder.dino_dim
+
+        # Expand: same query for all T frames → [B*T, qd]
+        query_exp = query.unsqueeze(1).expand(B, T, -1).reshape(BT, -1)
+
+        if mask_flat is not None:
+            n_real = mask_flat.sum().item()
+            if n_real == 0:
+                return torch.zeros(B, T, dd, device=query.device, dtype=query.dtype)
+            query_real = query_exp[mask_flat]                     # [n_real, qd]
+            z_real = self._batched_query_attend(query_real, kv_cache)
+            z_flat = torch.zeros(BT, dd, device=query.device, dtype=z_real.dtype)
+            z_flat[mask_flat] = z_real
+        else:
+            z_flat = self._batched_query_attend(query_exp, kv_cache)
+
+        return z_flat.reshape(B, T, dd)
+
+    def _query_all_frames_batched(
+        self, queries: torch.Tensor, kv_cache: list,
+        B: int, T: int, mask_flat=None,
+    ) -> torch.Tensor:
+        """
+        Apply per-frame queries in ONE batched query_attend call.
+
+        queries   : [B, T, query_dim]
+        kv_cache  : list of (K, V) per layer, each [n_real, N+1, D]
+        B, T      : batch and temporal dimensions
+        mask_flat : [B*T] bool or None
+        Returns   : [B, T, dino_dim]
+        """
+        BT = B * T
+        dd = self.encoder.dino_dim
+        queries_flat = queries.reshape(BT, -1)
+
+        if mask_flat is not None:
+            n_real = mask_flat.sum().item()
+            if n_real == 0:
+                return torch.zeros(B, T, dd, device=queries.device, dtype=queries.dtype)
+            query_real = queries_flat[mask_flat]                   # [n_real, qd]
+            z_real = self._batched_query_attend(query_real, kv_cache)
+            z_flat = torch.zeros(BT, dd, device=queries.device, dtype=z_real.dtype)
+            z_flat[mask_flat] = z_real
+        else:
+            z_flat = self._batched_query_attend(queries_flat, kv_cache)
+
+        return z_flat.reshape(B, T, dd)
+
+    def _extract_frame_kv(self, kv_cache: list, mask_flat, B: int, T: int, frame_idx: int):
+        """
+        Extract single-frame KV cache from flat format (for autoregressive/eval).
+
+        Returns list of (K, V) per layer, each [B, N+1, D].
+        """
+        if mask_flat is not None:
+            # Scatter compact caches to full [B*T] then extract frame
+            N1 = kv_cache[0][0].shape[1]
+            D = kv_cache[0][0].shape[2]
+            frame_kv = []
+            for K_real, V_real in kv_cache:
                 K_full = torch.zeros(B * T, N1, D, dtype=K_real.dtype, device=K_real.device)
                 V_full = torch.zeros(B * T, N1, D, dtype=V_real.dtype, device=V_real.device)
                 K_full[mask_flat] = K_real
                 V_full[mask_flat] = V_real
-                kv_cache_flat.append((K_full, V_full))
+                K_t = K_full.reshape(B, T, N1, D)[:, frame_idx]  # [B, N+1, D]
+                V_t = V_full.reshape(B, T, N1, D)[:, frame_idx]
+                frame_kv.append((K_t, V_t))
+            return frame_kv
         else:
-            _, kv_cache_flat = self.encoder.encode_patches(frames_flat)
-
-        N_plus_1 = kv_cache_flat[0][0].shape[1]
-        D = kv_cache_flat[0][0].shape[2]
-        num_layers = len(kv_cache_flat)
-
-        # Reshape from [B*T, ...] to [B, T, ...] and split per frame
-        per_frame_caches = []
-        for t in range(T):
+            N1 = kv_cache[0][0].shape[1]
+            D = kv_cache[0][0].shape[2]
             frame_kv = []
-            for li in range(num_layers):
-                K_all, V_all = kv_cache_flat[li]
-                K_bt = K_all.reshape(B, T, N_plus_1, D)
-                V_bt = V_all.reshape(B, T, N_plus_1, D)
-                frame_kv.append((K_bt[:, t], V_bt[:, t]))
-            per_frame_caches.append(frame_kv)
-
-        return per_frame_caches
-
-    def _query_all_frames(
-        self, query: torch.Tensor, caches: list, frame_mask=None,
-    ) -> torch.Tensor:
-        """
-        Apply a single query to every frame (parallel across T).
-
-        query      : [B, query_dim]  (same query for every frame)
-        caches     : list[T] of per-frame cache dicts
-        frame_mask : [B, T] bool — skip frames where no sample has data.
-        Returns: [B, T, dino_dim]
-        """
-        B = query.shape[0]
-        T = len(caches)
-        dd = self.encoder.dino_dim
-        z_list = []
-        for t in range(T):
-            if frame_mask is not None and not frame_mask[:, t].any():
-                z_list.append(torch.zeros(B, dd, device=query.device, dtype=query.dtype))
-            else:
-                z_list.append(self.encoder.query_attend(query, caches[t]))
-        return torch.stack(z_list, dim=1)
-
-    def _query_all_frames_batched(
-        self, queries: torch.Tensor, caches: list, frame_mask=None,
-    ) -> torch.Tensor:
-        """
-        Apply per-frame queries to every frame (parallel across T).
-
-        queries    : [B, T, query_dim]  (different query per frame)
-        caches     : list[T] of per-frame cache dicts
-        frame_mask : [B, T] bool — skip frames where no sample has data.
-        Returns : [B, T, dino_dim]
-        """
-        B, T = queries.shape[:2]
-        dd = self.encoder.dino_dim
-        z_list = []
-        for t in range(T):
-            if frame_mask is not None and not frame_mask[:, t].any():
-                z_list.append(torch.zeros(B, dd, device=queries.device, dtype=queries.dtype))
-            else:
-                z_list.append(self.encoder.query_attend(queries[:, t], caches[t]))
-        return torch.stack(z_list, dim=1)
+            for K_all, V_all in kv_cache:
+                K_t = K_all.reshape(B, T, N1, D)[:, frame_idx]
+                V_t = V_all.reshape(B, T, N1, D)[:, frame_idx]
+                frame_kv.append((K_t, V_t))
+            return frame_kv
 
     def _build_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """
@@ -293,11 +348,11 @@ class FoveatedVLM(nn.Module):
         S = input_ids.shape[1]
 
         # ---- Step 0: Encode all frames (DINO, shared across both passes) ----
-        per_frame_caches = self._encode_all_frames(frames, frame_mask)
+        kv_cache, mask_flat = self._encode_all_frames(frames, frame_mask)
 
         # ---- Pass 1: Coarse ----
         q_static = self.q_static.expand(B, -1)                     # [B, qd]
-        z_coarse = self._query_all_frames(q_static, per_frame_caches, frame_mask)  # [B,T,dd]
+        z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat)  # [B,T,dd]
         z_coarse_llm = self._project_visual(z_coarse)              # [B,T,ld]
 
         # Build coarse sequence: [visual_coarse, text]
@@ -320,7 +375,7 @@ class FoveatedVLM(nn.Module):
         shifted_queries = torch.cat([q_init, queries[:, :-1]], dim=1)  # [B,T,qd]
 
         # ---- Pass 2: Fine ----
-        z_fine = self._query_all_frames_batched(shifted_queries, per_frame_caches, frame_mask)  # [B,T,dd]
+        z_fine = self._query_all_frames_batched(shifted_queries, kv_cache, B, T, mask_flat)  # [B,T,dd]
         z_fine_llm = self._project_visual(z_fine)                  # [B,T,ld]
 
         # Build fine sequence: [visual_fine, text]
@@ -406,10 +461,10 @@ class FoveatedVLM(nn.Module):
         """
         B, T = frames.shape[:2]
 
-        per_frame_caches = self._encode_all_frames(frames, frame_mask)
+        kv_cache, mask_flat = self._encode_all_frames(frames, frame_mask)
 
         q_static = self.q_static.expand(B, -1)
-        z_coarse = self._query_all_frames(q_static, per_frame_caches, frame_mask)
+        z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat)
         z_coarse_llm = self._project_visual(z_coarse)
 
         if input_ids is not None:
@@ -490,7 +545,7 @@ class FoveatedVLM(nn.Module):
 
         # Encode all frames with DINO up front (this is OK -- DINO encoding
         # does not depend on the query, only query_attend does).
-        per_frame_caches = self._encode_all_frames(frames, frame_mask)
+        kv_cache, mask_flat = self._encode_all_frames(frames, frame_mask)
 
         # Enable KV cache on the LLM for incremental decoding
         orig_use_cache = self.llm.config.use_cache
@@ -501,7 +556,8 @@ class FoveatedVLM(nn.Module):
 
         for t in range(T):
             # Foveated extraction with current query
-            z_t = self.encoder.query_attend(query, per_frame_caches[t])  # [B, dd]
+            frame_kv = self._extract_frame_kv(kv_cache, mask_flat, B, T, t)
+            z_t = self.encoder.query_attend(query, frame_kv)  # [B, dd]
             z_t_llm = self._project_visual(z_t.unsqueeze(1))            # [B,1,ld]
             # dtype handled by autocast on GPU; float32 on CPU
 

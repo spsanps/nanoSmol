@@ -247,11 +247,12 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg,
             try:
                 frames = batch["frames"]
                 B, T = frames.shape[:2]
-                per_frame_caches = raw_model._encode_all_frames(frames)
+                kv_cache, mask_flat = raw_model._encode_all_frames(frames)
                 q_static = raw_model.q_static.expand(B, -1)
                 # Compute entropy on first frame
+                frame0_kv = raw_model._extract_frame_kv(kv_cache, mask_flat, B, T, 0)
                 _, attn_w = raw_model.encoder.query_attend(
-                    q_static, per_frame_caches[0], return_attention=True,
+                    q_static, frame0_kv, return_attention=True,
                 )
                 total_entropy += compute_attention_entropy(attn_w) * bs
                 entropy_count += bs
@@ -260,8 +261,9 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg,
                 if save_attn_dir and attn_samples_saved < max_attn_saves:
                     for t in range(min(T, 4)):
                         if t > 0:
+                            frame_kv = raw_model._extract_frame_kv(kv_cache, mask_flat, B, T, t)
                             _, attn_w = raw_model.encoder.query_attend(
-                                q_static, per_frame_caches[t], return_attention=True,
+                                q_static, frame_kv, return_attention=True,
                             )
                         save_attention_maps(
                             attn_w, save_attn_dir, step,
@@ -451,18 +453,29 @@ def train(cfg: dict, args):
             sync_ctx = model.no_sync() if (world_size > 1 and is_accum) else nullcontext()
 
             with sync_ctx:
-                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                    outputs = model(
-                        frames=batch["frames"],
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        loss_mask=batch["loss_mask"],
-                        frame_mask=batch.get("frame_mask"),
-                        mode=train_mode,
-                    )
-                    loss = outputs["loss"] / grad_accum
+                try:
+                    with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                        outputs = model(
+                            frames=batch["frames"],
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            loss_mask=batch["loss_mask"],
+                            frame_mask=batch.get("frame_mask"),
+                            mode=train_mode,
+                        )
+                        loss = outputs["loss"] / grad_accum
 
-                scaler.scale(loss).backward()
+                    scaler.scale(loss).backward()
+                except torch.cuda.OutOfMemoryError:
+                    # Rare: batch with too many real frames. Skip and continue.
+                    if is_main_process():
+                        n_real = batch.get("frame_mask", batch["frames"]).sum().item()
+                        print(f"  [OOM] Skipping batch at step {global_step} "
+                              f"(n_real={n_real}). Clearing cache.")
+                    torch.cuda.empty_cache()
+                    optimizer.zero_grad(set_to_none=True)
+                    micro_step = 0  # reset accumulation
+                    continue
 
             samples_seen += batch["frames"].shape[0] * world_size
             micro_step += 1
