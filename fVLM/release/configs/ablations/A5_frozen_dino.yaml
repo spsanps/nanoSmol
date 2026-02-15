@@ -42,8 +42,8 @@ data:
 
 training:
   total_samples: 300_000
-  batch_size: 4
-  grad_accum: 8
+  batch_size: 8
+  grad_accum: 4
   lr_connector: 1.0e-4
   lr_dino: 0.0               # <-- ABLATION: DINO completely frozen
   lr_llm: 1.0e-5

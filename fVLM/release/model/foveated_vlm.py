@@ -117,21 +117,43 @@ class FoveatedVLM(nn.Module):
         h = h * self.visual_scale                      # match LLM embedding magnitude
         return h
 
-    def _encode_all_frames(self, frames: torch.Tensor):
+    def _encode_all_frames(self, frames: torch.Tensor, frame_mask=None):
         """
         Run DINO patch encoding for every frame in the batch.
 
-        frames : [B, T, 3, 224, 224]
+        frames     : [B, T, 3, 224, 224]
+        frame_mask : [B, T] bool — True for real frames, False for padding.
+                     If None, all frames are encoded (legacy behavior).
         Returns list[T] of per-frame kv_cache lists (one (K,V) tuple per layer).
         """
         B, T, C, H, W = frames.shape
         frames_flat = frames.reshape(B * T, C, H, W)
 
-        # encode_patches returns (patch_features, kv_cache)
-        # patch_features: [B*T, N+1, D]
-        # kv_cache: list of (K, V) tuples, one per DINO layer
-        #   each K, V: [B*T, N+1, D]
-        _, kv_cache_flat = self.encoder.encode_patches(frames_flat)
+        # --- Optimization: skip padded frames through DINO ---
+        if frame_mask is not None:
+            mask_flat = frame_mask.reshape(B * T)
+            n_real = mask_flat.sum().item()
+        else:
+            mask_flat = None
+            n_real = B * T
+
+        if mask_flat is not None and n_real < B * T:
+            # Encode only real frames
+            real_frames = frames_flat[mask_flat]                  # [n_real, C, H, W]
+            _, kv_cache_real = self.encoder.encode_patches(real_frames)
+
+            # Scatter into full-size caches with zeros for padding
+            N1 = kv_cache_real[0][0].shape[1]
+            D = kv_cache_real[0][0].shape[2]
+            kv_cache_flat = []
+            for K_real, V_real in kv_cache_real:
+                K_full = torch.zeros(B * T, N1, D, dtype=K_real.dtype, device=K_real.device)
+                V_full = torch.zeros(B * T, N1, D, dtype=V_real.dtype, device=V_real.device)
+                K_full[mask_flat] = K_real
+                V_full[mask_flat] = V_real
+                kv_cache_flat.append((K_full, V_full))
+        else:
+            _, kv_cache_flat = self.encoder.encode_patches(frames_flat)
 
         N_plus_1 = kv_cache_flat[0][0].shape[1]
         D = kv_cache_flat[0][0].shape[2]
@@ -151,30 +173,46 @@ class FoveatedVLM(nn.Module):
         return per_frame_caches
 
     def _query_all_frames(
-        self, query: torch.Tensor, caches: list,
+        self, query: torch.Tensor, caches: list, frame_mask=None,
     ) -> torch.Tensor:
         """
         Apply a single query to every frame (parallel across T).
 
-        query  : [B, query_dim]  (same query for every frame)
-        caches : list[T] of per-frame cache dicts
+        query      : [B, query_dim]  (same query for every frame)
+        caches     : list[T] of per-frame cache dicts
+        frame_mask : [B, T] bool — skip frames where no sample has data.
         Returns: [B, T, dino_dim]
         """
-        z_list = [self.encoder.query_attend(query, caches[t]) for t in range(len(caches))]
+        B = query.shape[0]
+        T = len(caches)
+        dd = self.encoder.dino_dim
+        z_list = []
+        for t in range(T):
+            if frame_mask is not None and not frame_mask[:, t].any():
+                z_list.append(torch.zeros(B, dd, device=query.device, dtype=query.dtype))
+            else:
+                z_list.append(self.encoder.query_attend(query, caches[t]))
         return torch.stack(z_list, dim=1)
 
     def _query_all_frames_batched(
-        self, queries: torch.Tensor, caches: list,
+        self, queries: torch.Tensor, caches: list, frame_mask=None,
     ) -> torch.Tensor:
         """
         Apply per-frame queries to every frame (parallel across T).
 
-        queries : [B, T, query_dim]  (different query per frame)
-        caches  : list[T] of per-frame cache dicts
+        queries    : [B, T, query_dim]  (different query per frame)
+        caches     : list[T] of per-frame cache dicts
+        frame_mask : [B, T] bool — skip frames where no sample has data.
         Returns : [B, T, dino_dim]
         """
-        T = queries.shape[1]
-        z_list = [self.encoder.query_attend(queries[:, t], caches[t]) for t in range(T)]
+        B, T = queries.shape[:2]
+        dd = self.encoder.dino_dim
+        z_list = []
+        for t in range(T):
+            if frame_mask is not None and not frame_mask[:, t].any():
+                z_list.append(torch.zeros(B, dd, device=queries.device, dtype=queries.dtype))
+            else:
+                z_list.append(self.encoder.query_attend(queries[:, t], caches[t]))
         return torch.stack(z_list, dim=1)
 
     def _build_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
@@ -231,6 +269,7 @@ class FoveatedVLM(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         loss_mask: Optional[torch.Tensor] = None,
+        frame_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Two-pass parallel training forward.
@@ -254,11 +293,11 @@ class FoveatedVLM(nn.Module):
         S = input_ids.shape[1]
 
         # ---- Step 0: Encode all frames (DINO, shared across both passes) ----
-        per_frame_caches = self._encode_all_frames(frames)
+        per_frame_caches = self._encode_all_frames(frames, frame_mask)
 
         # ---- Pass 1: Coarse ----
         q_static = self.q_static.expand(B, -1)                     # [B, qd]
-        z_coarse = self._query_all_frames(q_static, per_frame_caches)  # [B,T,dd]
+        z_coarse = self._query_all_frames(q_static, per_frame_caches, frame_mask)  # [B,T,dd]
         z_coarse_llm = self._project_visual(z_coarse)              # [B,T,ld]
 
         # Build coarse sequence: [visual_coarse, text]
@@ -281,7 +320,7 @@ class FoveatedVLM(nn.Module):
         shifted_queries = torch.cat([q_init, queries[:, :-1]], dim=1)  # [B,T,qd]
 
         # ---- Pass 2: Fine ----
-        z_fine = self._query_all_frames_batched(shifted_queries, per_frame_caches)  # [B,T,dd]
+        z_fine = self._query_all_frames_batched(shifted_queries, per_frame_caches, frame_mask)  # [B,T,dd]
         z_fine_llm = self._project_visual(z_fine)                  # [B,T,ld]
 
         # Build fine sequence: [visual_fine, text]
@@ -343,6 +382,7 @@ class FoveatedVLM(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         loss_mask: Optional[torch.Tensor] = None,
+        frame_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Single-pass coarse forward (q_static only, no fine queries).
@@ -366,10 +406,10 @@ class FoveatedVLM(nn.Module):
         """
         B, T = frames.shape[:2]
 
-        per_frame_caches = self._encode_all_frames(frames)
+        per_frame_caches = self._encode_all_frames(frames, frame_mask)
 
         q_static = self.q_static.expand(B, -1)
-        z_coarse = self._query_all_frames(q_static, per_frame_caches)
+        z_coarse = self._query_all_frames(q_static, per_frame_caches, frame_mask)
         z_coarse_llm = self._project_visual(z_coarse)
 
         if input_ids is not None:
@@ -423,6 +463,7 @@ class FoveatedVLM(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         loss_mask: Optional[torch.Tensor] = None,
+        frame_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         True autoregressive inference: sequential frame-by-frame with KV cache.
@@ -449,7 +490,7 @@ class FoveatedVLM(nn.Module):
 
         # Encode all frames with DINO up front (this is OK -- DINO encoding
         # does not depend on the query, only query_attend does).
-        per_frame_caches = self._encode_all_frames(frames)
+        per_frame_caches = self._encode_all_frames(frames, frame_mask)
 
         # Enable KV cache on the LLM for incremental decoding
         orig_use_cache = self.llm.config.use_cache
@@ -547,19 +588,21 @@ class FoveatedVLM(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         loss_mask: Optional[torch.Tensor] = None,
+        frame_mask: Optional[torch.Tensor] = None,
         mode: str = "coarse_fine",
     ) -> Dict[str, torch.Tensor]:
         """
         Unified forward entry point.
 
         mode : "coarse_fine" | "coarse_only" | "autoregressive"
+        frame_mask : [B, T] bool — True for real frames, False for padding.
         """
         if mode == "coarse_fine":
-            return self.forward_coarse_fine(frames, input_ids, attention_mask, loss_mask)
+            return self.forward_coarse_fine(frames, input_ids, attention_mask, loss_mask, frame_mask)
         elif mode == "coarse_only":
-            return self.forward_coarse_only(frames, input_ids, attention_mask, loss_mask)
+            return self.forward_coarse_only(frames, input_ids, attention_mask, loss_mask, frame_mask)
         elif mode == "autoregressive":
-            return self.forward_autoregressive(frames, input_ids, attention_mask, loss_mask)
+            return self.forward_autoregressive(frames, input_ids, attention_mask, loss_mask, frame_mask)
         else:
             raise ValueError(
                 f"Unknown forward mode '{mode}'. "

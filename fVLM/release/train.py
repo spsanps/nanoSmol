@@ -24,6 +24,9 @@ import torch.nn as nn
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+# TF32 for free speedup on Ampere+ GPUs (RTX 3090, A100, RTX 5090, etc.)
+torch.set_float32_matmul_precision("high")
+
 # Ensure release/ is importable when run from repo root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -225,6 +228,7 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg,
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 loss_mask=batch["loss_mask"],
+                frame_mask=batch.get("frame_mask"),
                 mode=eval_mode,
             )
 
@@ -360,8 +364,8 @@ def train(cfg: dict, args):
     # ---- torch.compile ----
     if cfg["training"].get("compile", False) and hasattr(torch, "compile"):
         if is_main_process():
-            print("  Compiling encoder with torch.compile ...")
-        raw_model.encoder = torch.compile(raw_model.encoder)
+            print("  Compiling encoder with torch.compile (dynamic=True) ...")
+        raw_model.encoder = torch.compile(raw_model.encoder, dynamic=True)
 
     # ---- Val loader ----
     val_loader = build_val_loader(cfg)
@@ -437,6 +441,7 @@ def train(cfg: dict, args):
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         loss_mask=batch["loss_mask"],
+                        frame_mask=batch.get("frame_mask"),
                         mode=train_mode,
                     )
                     loss = outputs["loss"] / grad_accum

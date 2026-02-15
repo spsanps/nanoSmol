@@ -85,11 +85,12 @@ class MultiTokenVLM(nn.Module):
     def _embed_text(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.llm.get_input_embeddings()(input_ids)
 
-    def _encode_frames(self, frames: torch.Tensor) -> torch.Tensor:
+    def _encode_frames(self, frames: torch.Tensor, frame_mask=None) -> torch.Tensor:
         """
         Encode video frames to multi-token visual representations.
 
-        frames : [B, T, 3, 224, 224]
+        frames     : [B, T, 3, 224, 224]
+        frame_mask : [B, T] bool — True for real frames, False for padding.
         Returns: [B, T * tokens_per_frame, llm_dim]
         """
         B, T, C, H, W = frames.shape
@@ -97,9 +98,26 @@ class MultiTokenVLM(nn.Module):
         # Flatten batch and time
         flat = frames.reshape(B * T, C, H, W)
 
-        # DINOv2 forward → patch features [B*T, N+1, D] (CLS + patches)
-        dino_out = self.dino(flat)
-        patch_features = dino_out.last_hidden_state[:, 1:, :]  # drop CLS → [B*T, N, D]
+        # Skip padded frames through DINO for efficiency
+        if frame_mask is not None:
+            mask_flat = frame_mask.reshape(B * T)
+            n_real = mask_flat.sum().item()
+        else:
+            mask_flat = None
+            n_real = B * T
+
+        if mask_flat is not None and n_real < B * T:
+            real_frames = flat[mask_flat]
+            dino_out = self.dino(real_frames)
+            real_features = dino_out.last_hidden_state[:, 1:, :]  # drop CLS
+            # Scatter back
+            N = real_features.shape[1]
+            patch_features = torch.zeros(B * T, N, self.dino_dim, dtype=real_features.dtype, device=real_features.device)
+            patch_features[mask_flat] = real_features
+        else:
+            # DINOv2 forward → patch features [B*T, N+1, D] (CLS + patches)
+            dino_out = self.dino(flat)
+            patch_features = dino_out.last_hidden_state[:, 1:, :]  # drop CLS → [B*T, N, D]
 
         # Reshape to spatial grid
         grid_size = int(patch_features.shape[1] ** 0.5)  # 16 for 224/14
@@ -150,6 +168,7 @@ class MultiTokenVLM(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         loss_mask: Optional[torch.Tensor] = None,
+        frame_mask: Optional[torch.Tensor] = None,
         mode: str = "coarse_fine",  # ignored, for API compat with FoveatedVLM
     ) -> Dict[str, torch.Tensor]:
         """
@@ -159,6 +178,7 @@ class MultiTokenVLM(nn.Module):
         input_ids      : [B, S]
         attention_mask : [B, S]
         loss_mask      : [B, S]
+        frame_mask     : [B, T] bool — True for real frames, False for padding.
         mode           : ignored (API compat with FoveatedVLM)
         """
         B, T = frames.shape[:2]
@@ -166,7 +186,7 @@ class MultiTokenVLM(nn.Module):
         V_tokens = T * self.tokens_per_frame  # total visual tokens
 
         # ---- Encode frames ----
-        visual_embeds = self._encode_frames(frames)  # [B, V_tokens, llm_dim]
+        visual_embeds = self._encode_frames(frames, frame_mask)  # [B, V_tokens, llm_dim]
 
         # ---- Build sequence: [visual, text] ----
         text_embeds = self._embed_text(input_ids)  # [B, S, llm_dim]
