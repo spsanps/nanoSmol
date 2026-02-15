@@ -285,68 +285,14 @@ Do all of this BEFORE renting GPUs.
 
 ## 6. Ablation Plan (Phase 1)
 
+> **SUPERSEDED:** The detailed ablation plan is now in [`docs/GPU_PHASE1_PLAN.md`](GPU_PHASE1_PLAN.md).
+> The old A1-A8, LR1-LR4, T1-T4 tables below are kept for historical reference only.
+> Key changes: dropped reconstruction-era experiments (multi-fine, attention temperature, prediction head),
+> reorganized as 5 sweeps (freeze strategy, LR ratio, architecture validation, image handling, data mix).
+
 **Goal:** Establish best architecture config at small scale before spending compute on 1.7B.
 
-All runs: SmolLM2-135M, 360K samples, 3M-sample LR schedule, same eval set.
-
-### 6a. Architecture Ablations
-
-One change at a time vs baseline (current best config).
-
-| ID | Variable | Values | Hypothesis |
-|----|----------|--------|------------|
-| A1 | Deep query | on / off | Deep query enables selective attention |
-| A2 | Multi-fine iterations | 1 / 2 / 3 | More refinement → better queries |
-| A3 | Tokens per frame | 1 / 4 | More tokens help baseline, less help for foveated |
-| A4 | DINO frozen vs finetuned | frozen / tuned | Frozen preserves feature diversity |
-| A5 | Attention temperature | 1.0 / 0.5 / learnable | Sharper attention → bigger fine/coarse gap |
-| A6 | Prediction head capacity | 2-layer / 4-layer | More capacity in decoder |
-| A7 | Stage 1 backbone freezing | frozen / unfrozen (diff LR) | Is frozen connector bootstrap necessary at small scale? |
-| A8 | Static frame replication | 1 / 8 / 16 repeated frames for image data | Does replicating still images as multi-frame "videos" improve temporal pipeline training? (see KNOWLEDGE.md for full rationale) |
-
-### 6b. Learning Rate Study
-
-Three components, three learning rates. The **ratio** matters more than absolute values.
-
-| Component | Why It's Different | Intuition |
-|-----------|-------------------|-----------|
-| **Connector** (query attn, projection) | Randomly initialized, must learn from scratch | Highest LR |
-| **DINO encoder** | Pretrained, good features already | Lowest LR (don't destroy features) |
-| **LLM** | Pretrained+Instruct, must adapt to vision tokens | Medium LR (adapt but don't forget) |
-
-**Runs to test** (4 runs at 135M, ~2h total):
-
-| ID | Connector LR | DINO LR | LLM LR | Hypothesis |
-|----|-------------|---------|--------|------------|
-| LR1 | 1e-4 | 1e-5 | 1e-5 | Conservative backbone, 10x ratio |
-| LR2 | 1e-4 | 1e-6 | 1e-5 | Very conservative DINO, 100x ratio |
-| LR3 | 5e-4 | 1e-5 | 5e-5 | Aggressive connector, 50x/10x ratio |
-| LR4 | 1e-4 | 1e-5 | 1e-5 (uniform) | Baseline: is differential even needed? |
-
-> **Intuition:** LR1 or LR2 likely wins. DINO features are good out of the box — a 100x ratio (LR2) may be right because we want DINO to barely move while the connector learns to use its features. The LLM needs moderate adaptation to accept visual tokens without forgetting language.
-
-**What to skip** (use standard choices):
-| Decision | Standard Choice | Why Skip |
-|----------|----------------|----------|
-| Schedule shape | Cosine decay | Universal default, rarely worth ablating at our scale |
-| Warmup | 5-10% of total steps | Standard; only matters if diverging at start |
-| Weight decay | 0.01-0.1 | Second-order effect vs LR ratios |
-| Batch size vs LR scaling | Linear scaling rule | Well-established, not worth testing |
-
-**What to watch for:**
-- If LR4 (uniform) matches LR1-LR3 → differential LR doesn't matter, simplify the pipeline
-- If DINO LR matters a lot → DINO features are fragile, consider freezing it entirely
-- If LLM LR matters a lot → language forgetting is a real concern, may need more text retention
-
-### 6c. Task Ablations
-
-
-| ID | Training Mix | Hypothesis |
-|----|-------------|------------|
-| T1 | Captioning only | Baseline text prediction |
-| T2 | Captioning + VQA | Multi-task helps generalization |
-| T3 | Captioning + VQA + QA (question-first) | Task-aware foveation (see Section 8) |
-| T4 | Full mix (33% video, 34% image, 20% text, 12% multi-image) | SmolVLM2 recipe |
+All runs: SmolLM2-135M, 360K samples, same eval set. See GPU_PHASE1_PLAN.md for the current 10-11 run plan.
 
 ### 6d. Ablation Methodology
 

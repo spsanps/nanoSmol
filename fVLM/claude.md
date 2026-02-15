@@ -183,12 +183,14 @@ When loss is NaN or exploding:
 | Document | Purpose |
 |----------|---------|
 | `core_docs/foveated_vlm_proposal.md` | Architecture specification |
-| `docs/KNOWLEDGE.md` | Bugs, fixes, experiments, insights |
+| `docs/KNOWLEDGE.md` | Bugs, fixes, experiments, insights, dataset inventory |
 | `docs/SCALING_PLAN.md` | 3-stage training plan, scaling study |
+| `docs/GPU_PHASE1_PLAN.md` | Ablation sweeps for GPU Phase 1 |
 | `docs/runpod/BRIEFING.md` | Full project context for fresh invocations |
 | `docs/runpod/SMOLVLM2_REFERENCE.md` | SmolVLM2 training details |
 | `docs/RESEARCH_PLAYBOOK.md` | Research methodology |
+| `docs/legacy/` | Old reconstruction-era docs (reference only) |
 
 ---
 
-*Last updated: 2026-02-11*
+*Last updated: 2026-02-14*
