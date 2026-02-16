@@ -225,11 +225,12 @@ def main():
         # Append to CSV after each run (for incremental monitoring)
         write_header = not results_csv.exists()
         with open(results_csv, "a" if not write_header else "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=[
+            fieldnames = [
                 "run_id", "size", "budget", "arch", "flop_budget",
-                "total_samples", "status", "wall_time_sec",
+                "total_samples", "status", "returncode", "wall_time_sec",
                 "final_train_loss", "best_val_loss", "best_val_step",
-            ])
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             if write_header:
                 writer.writeheader()
             writer.writerow(result)
