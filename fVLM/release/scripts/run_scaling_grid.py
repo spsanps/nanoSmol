@@ -74,9 +74,14 @@ def generate_run_configs(template_cfg: dict) -> list:
                     cfg["model"].pop("tokens_per_frame", None)
                     cfg["model"].pop("multi_token", None)
 
-                # 1.7B needs gradient checkpointing
+                # Adjust batch/memory settings per model size
                 if "1.7B" in size_name:
                     cfg["model"]["gradient_checkpointing"] = True
+                    cfg["training"]["batch_size"] = 2
+                    cfg["training"]["grad_accum"] = 16
+                elif "360M" in size_name:
+                    cfg["training"]["batch_size"] = 4
+                    cfg["training"]["grad_accum"] = 8
 
                 # Compute sample count for this FLOP budget
                 num_samples = compute_samples_for_budget(flop_budget, cfg)
@@ -124,7 +129,7 @@ def run_training(cfg: dict, run_id: str, output_dir: str, dry_run: bool = False)
 
     # Run training
     cmd = [
-        sys.executable, "release/train.py",
+        sys.executable, "-u", "release/train.py",
         "--config", str(config_path),
     ]
 
@@ -133,12 +138,16 @@ def run_training(cfg: dict, run_id: str, output_dir: str, dry_run: bool = False)
     print(f"  Samples: {cfg['training']['total_samples']:,}")
     print(f"  LLM: {cfg['model']['llm']}")
     print(f"  Arch: {'multi_token' if cfg['model'].get('multi_token') else 'foveated'}")
+    print(f"  Batch: {cfg['training']['batch_size']} × {cfg['training']['grad_accum']}")
     print(f"{'='*60}")
 
     t0 = time.time()
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     result = subprocess.run(
         cmd, capture_output=False, text=True,
         cwd=str(Path(__file__).resolve().parent.parent.parent),
+        env=env,
     )
     elapsed = time.time() - t0
 
@@ -170,7 +179,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Print configs without running")
     parser.add_argument("--filter", default=None,
-                        help="Only run configs matching this substring (e.g. '135M', 'C2', 'foveated')")
+                        help="Only run configs matching this substring (e.g. '135M', 'C2')")
+    parser.add_argument("--arch", default=None, choices=["foveated", "multi_token"],
+                        help="Only run this architecture (default: both)")
     args = parser.parse_args()
 
     # Load template
@@ -180,9 +191,13 @@ def main():
     # Generate grid
     all_runs = generate_run_configs(template)
 
-    # Filter
+    # Filter by run_id substring
     if args.filter:
         all_runs = [r for r in all_runs if args.filter in r["run_id"]]
+
+    # Filter by architecture
+    if args.arch:
+        all_runs = [r for r in all_runs if r["arch"] == args.arch]
 
     print(f"Scaling grid: {len(all_runs)} runs")
     print(f"Template: {args.template}")

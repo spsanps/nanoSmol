@@ -1,0 +1,72 @@
+# =============================================================================
+# Phase 1b Scaling Grid Template
+# =============================================================================
+# Best Phase 1a settings:
+#   - D1 video-heavy data mix (winner by 0.049)
+#   - LR2 aggressive connector LR 100:1 (winner by 0.028)
+#   - deep_query + fine pass (full architecture, user preference)
+#   - Full fine-tuning (frozen runs were 0.5+ worse)
+#
+# The scaling grid runner overrides: model.llm, training.total_samples,
+# checkpoint.save_dir, wandb.run_name, and architecture (foveated vs multi_token).
+#
+# NOTE: lr_connector=1e-3 worked great at 135M. May need reduction at 1.7B
+# for stability. Monitor grad_norm and divergence.
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-135M-Instruct   # overridden by grid
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false                   # grid sets true for 1.7B
+
+data:
+  train_shards:
+    - "/workspace/data/openvid/*.tar"
+    - "/workspace/data/vript_long_shards/*.tar"
+    - "/workspace/data/sharegpt4video_shards/*.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 8
+
+training:
+  total_samples: 300_000                          # overridden by grid
+  batch_size: 8
+  grad_accum: 4
+  lr_connector: 1.0e-3                            # 100:1 from LR2 winner
+  lr_dino: 1.0e-5
+  lr_llm: 1.0e-5
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: cosine
+  dtype: bfloat16
+  compile: false
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/scaling         # overridden by grid
+  save_every_steps: 1000
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 500
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-scaling
+  run_name: scaling_run                            # overridden by grid
