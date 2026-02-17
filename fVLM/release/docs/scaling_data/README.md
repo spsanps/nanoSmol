@@ -33,9 +33,12 @@ Five scaling runs at two model sizes with increasing compute budgets:
 | 135M-C2-F | 135M | 157.6M | cosine | 5.6e16 FLOPs | 228K | 1.3251 | Complete |
 | 135M-C3-F | 135M | 157.6M | cosine | 1.6e17 FLOPs | 648K | 1.3132 | Complete |
 | 135M-C4-F | 135M | 157.6M | cosine | 5.6e17 FLOPs | 386K* | 1.2286 | Interrupted |
-| 360M-scaling | 360M | 382.6M | constant | — | 702K | 1.3501 | Complete |
+| 135M-scaling | 135M | 157.6M | constant | — | 656K | 1.1923 | Complete |
+| 360M-scaling | 360M | 382.6M | constant | — | 702K | 1.3501 | Complete (LR too high) |
 
 *C4 was interrupted at step 12060/~39100 (~31% complete). Its 24 eval points are included.
+**135M-scaling is the corrected rerun with constant LR (matches 360M design).
+***360M-scaling used 135M-tuned LRs (1e-3 connector) — too aggressive. LR sweep in progress.
 
 ## Model Configurations
 
@@ -54,10 +57,11 @@ Five scaling runs at two model sizes with increasing compute budgets:
 
 ## Key Findings
 
-1. **Val loss decreases with more data** across all runs, as expected.
-2. **LR schedule mismatch is a critical caveat**: The 135M runs used cosine decay while 360M used constant LR. Cosine decay artificially reduces loss late in training (lower LR → lower instantaneous loss), making 135M appear to scale better than 360M. The joint Chinchilla fit is unreliable for this reason.
-3. **Per-size fits are more trustworthy** than the joint fit. The 360M constant-LR fit (RMSE=0.023) is cleaner than the 135M cosine fit (RMSE=0.058).
-4. **C4 (interrupted)** was on a strong trajectory — its best val loss of 1.229 at 386K samples is already better than C3's final 1.313 at 648K, likely due to seeing the steepest part of the cosine-boosted learning curve.
+1. **135M constant-LR (1.1923) is the best result so far** — 82 clean eval points, every one valid for scaling law fits.
+2. **360M used wrong LR** — same connector LR (1e-3) as 135M. 360M best (1.3501) barely beats 135M ablation baselines (~1.36). Curves never cross: 135M beats 360M at every sample count. This is a hyperparameter problem, not a model capacity problem.
+3. **LR sweep in progress** — testing 360M with {3e-4, 5e-4, 7e-4} and 1.7B with {1e-4, 2e-4, 3e-4, 5e-4}. Standard heuristic: LR ~ 1/sqrt(N/N_base). Each sweep is 100K samples with cosine schedule + dense evals.
+4. **After LR sweep**: re-run 360M and 1.7B full scaling runs with winning LRs → proper 3-point Chinchilla fit.
+5. **C1-C3 (cosine)** have LR schedule artifacts making them non-comparable with constant-LR runs. C4 (interrupted) was on a strong trajectory but only 31% complete.
 
 ## Column Reference
 
