@@ -1,15 +1,14 @@
 # =============================================================================
-# Ablation A8d: Static Frame Replication (8 frames)
+# Long Video Experiment: Fine Pass (baseline)
 # =============================================================================
-# Intermediate between A8a (1 frame, val=3.027) and A8b (16 frames, val=3.049).
-# Tests whether 8 replicated frames hits a sweet spot for image understanding
-# with the foveated query mechanism.
+# Tests fine pass on LONG videos only (>=30 frames = 30+ seconds).
+# Hypothesis: fine pass gap widens with video length due to temporal diversity.
 #
-# Change from A8a:
-#   replicate_image_frames: 8
+# Paired with longvid_coarse.yaml (coarse_only=true).
+# Dataset: Vript Long, filtered to frame_count >= 30.
 # =============================================================================
 
-stage: 2
+stage: 1
 
 model:
   llm: /workspace/models/SmolLM2-135M-Instruct
@@ -21,21 +20,21 @@ model:
   gradient_checkpointing: false
 
 data:
-  train_shards: "/workspace/data/cauldron_full/*.tar"
+  train_shards: "/workspace/data/vript_long_shards/*.tar"
   val_shards: "/workspace/data/eval/val_10k/*.tar"
-  text_shards: "/workspace/data/text_retention/stage2/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
   text_ratio: 0.14
   max_frames: 64
+  min_frames: 30                     # <-- FILTER: only long videos (30+ seconds)
   frame_size: 224
   num_workers: 2
   prefetch_factor: 2
-  replicate_image_frames: 8
 
 training:
   total_samples: 300_000
   batch_size: 8
   grad_accum: 4
-  lr_connector: 1.0e-4
+  lr_connector: 1.0e-3
   lr_dino: 1.0e-5
   lr_llm: 1.0e-5
   warmup_ratio: 0.05
@@ -47,10 +46,10 @@ training:
   seed: 42
 
 loss:
-  type: text_ce_answer_only
+  type: text_ce_all
 
 checkpoint:
-  save_dir: /workspace/checkpoints/ablations/A8_static_8frames
+  save_dir: /workspace/checkpoints/ablations/longvid_fine
   save_every_steps: 1000
   keep_last: 2
   keep_best: 1
@@ -63,4 +62,4 @@ eval:
 
 wandb:
   project: foveated-vlm-ablations
-  run_name: A8_static_8frames
+  run_name: longvid_fine

@@ -1,12 +1,12 @@
 # =============================================================================
-# Ablation A8d: Static Frame Replication (8 frames)
+# Ablation A8c: Static Frame Replication (4 frames)
 # =============================================================================
 # Intermediate between A8a (1 frame, val=3.027) and A8b (16 frames, val=3.049).
-# Tests whether 8 replicated frames hits a sweet spot for image understanding
+# Tests whether 4 replicated frames hits a sweet spot for image understanding
 # with the foveated query mechanism.
 #
 # Change from A8a:
-#   replicate_image_frames: 8
+#   replicate_image_frames: 4
 # =============================================================================
 
 stage: 2
@@ -29,7 +29,7 @@ data:
   frame_size: 224
   num_workers: 2
   prefetch_factor: 2
-  replicate_image_frames: 8
+  replicate_image_frames: 4
 
 training:
   total_samples: 300_000
@@ -50,7 +50,7 @@ loss:
   type: text_ce_answer_only
 
 checkpoint:
-  save_dir: /workspace/checkpoints/ablations/A8_static_8frames
+  save_dir: /workspace/checkpoints/ablations/A8_static_4frames
   save_every_steps: 1000
   keep_last: 2
   keep_best: 1
@@ -63,4 +63,4 @@ eval:
 
 wandb:
   project: foveated-vlm-ablations
-  run_name: A8_static_8frames
+  run_name: A8_static_4frames
