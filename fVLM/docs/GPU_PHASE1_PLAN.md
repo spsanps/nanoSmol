@@ -1,7 +1,9 @@
 # GPU Phase 1: Ablations + Scaling Grid
 
+> **NOTE:** Phase 1a is COMPLETE. All training decisions from ablations are now locked in **[`TRAINING_PLAN.md`](TRAINING_PLAN.md)** — that doc is the single source of truth for full training stages, data assignments, and formatting. This doc remains the reference for Phase 1b scaling grid design and ablation methodology.
+
 **Date:** 2026-02-14 (v4)
-**Hardware:** 2xA100-80GB
+**Hardware:** 1x RTX 5090 32GB (updated from original 2xA100 plan)
 **Val set:** Fixed val_10k (10K samples, mixed sources)
 **wandb projects:** `foveated-vlm-ablations`, `foveated-vlm-scaling`
 

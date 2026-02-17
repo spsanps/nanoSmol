@@ -1,5 +1,7 @@
 # fVLM Scaling Plan
 
+> **SUPERSEDED:** Training decisions, stage assignments, and data mix are now in **[`TRAINING_PLAN.md`](TRAINING_PLAN.md)**. This doc is kept for historical reference (architecture rationale, SmolVLM2 insights, engineering prep lists). If anything here conflicts with TRAINING_PLAN.md, TRAINING_PLAN.md wins.
+
 **Date:** 2026-02-09 (v3)
 **Target:** Release-quality foveated VLM on HuggingFace
 **Budget:** $500 on RunPod
