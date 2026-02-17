@@ -33,11 +33,28 @@ Release: HuggingFace + blog
 
 ## Phase 1b: What Remains
 
+### Scaling
+
 1. **135M constant-LR rerun** (~8h) — current 135M used cosine, 360M used constant. Can't compare until both match.
 2. **Analyze scaling curves** → pick model size (135M vs 360M)
 3. 1.7B deferred to A100 if budget allows
 
-**NOT running:** coarse-vs-fine at scale comparison (architecture already decided), multi-token baselines (those are for paper figures, not blocking training), downstream benchmarks (those come after Stage 3).
+### Experiments blocking full training decisions
+
+4. **A8 image frame replication: N=4 and N=8** — We have N=1 (A8a) and N=16 (A8b) from Phase 1a. Need intermediate points to find the sweet spot for `replicate_image_frames` in Stage 2-3. Run on Cauldron image data, same setup as A8a/A8b. There is NO multi-token experiment — the architecture is always foveated. Replicated frames with diverse dynamic queries IS how foveated handles images.
+
+5. **Coarse vs fine on long videos only** — Validates fine pass where it should matter most.
+
+   **Dataset:** Vript Long (400K samples, `/workspace/data/vript_long_shards/`). Filter to `frame_count >= 30` (30-64 frames, i.e. 30+ second clips). Vript Long is purpose-built as long video clips — better than OpenVid (avg ~7 frames, mostly short) or LLaVA-Video (67% truncated at 64-frame cap = lossy).
+
+   **Runs:** baseline (deep+fine) vs A6-style (deep+coarse_only) on this filtered subset, same sample count, same config otherwise.
+
+   **Hypothesis:** Fine pass gap widens with video length because more temporal diversity means static queries can't cover everything. At 300K mixed samples (short+long, Phase 1a) the gap was only 0.008 — it should be larger when isolated to long videos where temporal attention actually matters.
+
+   **Paper result:** If coarse≈fine on short videos but fine>>coarse on long videos → "foveation matters most when temporal complexity is high." Clean, publishable finding.
+
+### Priority order
+Run (1) first (already planned), then (4) and (5) can run in parallel. Benchmarks come after full Stage 3 training.
 
 ---
 
@@ -149,7 +166,7 @@ This teaches visual grounding without polluting the model's conversational style
 | **Frame count** | Variable: `min(video_duration_seconds, 64)` |
 | **Long video fallback** | Videos >64s: uniform spacing (evenly spaced, still 64 max) |
 | **Resolution** | 224×224 (DINOv2-small native) |
-| **Images in training** | Replicated to N frames (N = TBD from A8 results: 1 vs 16) |
+| **Images in training** | Replicated to N frames (N = TBD from A8 results: 1, 4, 8, 16) |
 
 ---
 
@@ -209,7 +226,6 @@ SmolTalk is split into 3 stages that match our training stages:
 |----------|--------|---------|
 | SmolVLM2-256M | HuggingFace (pretrained) | Direct param-count comparison |
 | SmolVLM2-2.2B | HuggingFace (pretrained) | Quality upper bound |
-| B1 (16 tok/frame) | Our training | Iso-FLOP efficiency claim (images only) |
 
 ---
 
