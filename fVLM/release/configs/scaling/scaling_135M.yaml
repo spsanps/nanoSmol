@@ -1,0 +1,72 @@
+# =============================================================================
+# 135M Single Scaling Run (constant LR, dense evals)
+# =============================================================================
+# Matches scaling_360M.yaml design: ONE long run at C4 budget with constant LR
+# + eval every 250 steps for a continuous scaling curve.
+#
+# 135M at C4 budget = 1,253,334 samples = 39,166 steps → 156 eval points.
+#
+# Equivalent budget checkpoints:
+#   C1 ≈ step  2,021 ( 65K samples)
+#   C2 ≈ step  7,075 (226K samples)
+#   C3 ≈ step 20,215 (647K samples)
+#   C4 = step 39,166 (1.25M samples)
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-135M-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false
+
+data:
+  train_shards:
+    - "/workspace/data/openvid/*.tar"
+    - "/workspace/data/vript_long_shards/*.tar"
+    - "/workspace/data/sharegpt4video_shards/*.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 2
+  prefetch_factor: 2
+
+training:
+  total_samples: 656000
+  batch_size: 8
+  grad_accum: 4
+  lr_connector: 1.0e-3
+  lr_dino: 1.0e-5
+  lr_llm: 1.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: constant
+  dtype: bfloat16
+  compile: false
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/scaling/135M-scaling
+  save_every_steps: 2000
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 250
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-scaling
+  run_name: 135M-scaling-constant-lr

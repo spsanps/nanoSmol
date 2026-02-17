@@ -1,0 +1,72 @@
+# =============================================================================
+# 360M Single Scaling Run (constant LR, dense evals)
+# =============================================================================
+# Instead of 4 separate runs (C1-C4), we run ONE long run at the C4 budget
+# with constant LR + eval every 250 steps. This gives ~88 val_loss data points
+# for a continuous scaling curve. Every intermediate checkpoint is valid because
+# constant LR means no schedule-dependent artifacts.
+#
+# Equivalent budget checkpoints:
+#   C1 ≈ step  1,132 ( 36K samples)
+#   C2 ≈ step  3,962 (127K samples)
+#   C3 ≈ step 11,321 (362K samples)
+#   C4 = step 21,935 (702K samples)
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-360M-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false
+
+data:
+  train_shards:
+    - "/workspace/data/openvid/*.tar"
+    - "/workspace/data/vript_long_shards/*.tar"
+    - "/workspace/data/sharegpt4video_shards/*.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 2
+  prefetch_factor: 2
+
+training:
+  total_samples: 701920
+  batch_size: 4
+  grad_accum: 8
+  lr_connector: 1.0e-3
+  lr_dino: 1.0e-5
+  lr_llm: 1.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: constant       # constant LR after warmup — every eval is a valid scaling point
+  dtype: bfloat16
+  compile: true
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/scaling/360M-scaling
+  save_every_steps: 2000
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 250          # dense evals → ~88 data points for scaling curve
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-scaling
+  run_name: 360M-scaling-constant-lr
