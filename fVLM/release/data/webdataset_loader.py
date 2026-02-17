@@ -44,14 +44,26 @@ _FRAME_INDEX_RE = re.compile(r"^(.+)_(\d{3})\.(jpg|jpeg|png)$")
 _SINGLE_FRAME_RE = re.compile(r"^(.+)\.(jpg|jpeg|png)$")
 
 
+_NORM_MEAN = torch.tensor(IMAGENET_MEAN).view(3, 1, 1)
+_NORM_STD = torch.tensor(IMAGENET_STD).view(3, 1, 1)
+
+
 def _load_image_tensor(data: bytes) -> torch.Tensor:
     """Decode JPEG/PNG bytes to a [3, 224, 224] float32 tensor, ImageNet-normalized."""
-    from PIL import Image
-
-    img = Image.open(io.BytesIO(data)).convert("RGB")
-    tensor = TF.to_tensor(img)  # [3, H, W] float32 in [0, 1]
-    tensor = TF.normalize(tensor, mean=IMAGENET_MEAN, std=IMAGENET_STD)
-    return tensor
+    try:
+        # Fast path: torchvision decode_jpeg — avoids PIL/numpy overhead
+        from torchvision.io import decode_jpeg
+        raw = torch.frombuffer(bytearray(data), dtype=torch.uint8)
+        tensor = decode_jpeg(raw).float().div_(255.0)  # [3, H, W]
+        tensor.sub_(_NORM_MEAN).div_(_NORM_STD)
+        return tensor
+    except Exception:
+        # Fallback: PIL (handles PNG and edge cases)
+        from PIL import Image
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        tensor = TF.to_tensor(img)  # [3, H, W] float32 in [0, 1]
+        tensor = TF.normalize(tensor, mean=IMAGENET_MEAN, std=IMAGENET_STD)
+        return tensor
 
 
 def _decode_mp4_frames(mp4_bytes: bytes, max_frames: int = 64) -> list[torch.Tensor]:
@@ -279,11 +291,42 @@ def _is_valid(sample) -> bool:
     return sample is not None
 
 
+def _min_frames_filter(min_frames: int):
+    """Filter predicate: keep only samples with >= min_frames frames."""
+    def _filter(sample):
+        return sample is not None and sample["frames"].shape[0] >= min_frames
+    return _filter
+
+
+def _length_sort_buffer(buffer_size: int = 1000):
+    """
+    Sort samples by frame count within a rolling buffer.
+
+    When the DataLoader forms batches from consecutive samples, this ensures
+    samples with similar frame counts end up in the same batch — dramatically
+    reducing padding waste.  A buffer of 1000 samples (default) gives good
+    grouping while maintaining enough randomization.
+    """
+    def _sort(src):
+        buf = []
+        for sample in src:
+            buf.append(sample)
+            if len(buf) >= buffer_size:
+                buf.sort(key=lambda s: s["frames"].shape[0])
+                yield from buf
+                buf = []
+        if buf:
+            buf.sort(key=lambda s: s["frames"].shape[0])
+            yield from buf
+    return _sort
+
+
 def create_webdataset(
     shard_pattern: str,
     tokenizer=None,
     stage: int = 1,
     max_frames: int = 64,
+    min_frames: int = 0,
     shuffle: bool = True,
     seed: int = 42,
     epoch: int = 0,
@@ -371,6 +414,16 @@ def create_webdataset(
                                           replicate_image_frames=replicate_image_frames))
     dataset = dataset.select(_is_valid)
 
+    if min_frames > 0:
+        dataset = dataset.select(_min_frames_filter(min_frames))
+
+    # Length-sort buffer DISABLED: grouping long videos into same batch causes
+    # (1) GPU OOM cascades (n_real > 700), (2) RAM growth from worker backlog
+    # during OOM retry loops, (3) system OOM crashes.  Random batching with
+    # bucketed padding is safer and only ~10-15% less efficient.
+    # if shuffle:
+    #     dataset = dataset.compose(_length_sort_buffer(128))
+
     if batch_size is not None:
         dataset = dataset.batched(batch_size)
 
@@ -381,6 +434,7 @@ def make_dataloader(
     shard_pattern: str,
     batch_size: int,
     max_frames: int = 64,
+    min_frames: int = 0,
     shuffle: bool = True,
     seed: int = 42,
     epoch: int = 0,
@@ -407,6 +461,7 @@ def make_dataloader(
         tokenizer=tokenizer,
         stage=stage,
         max_frames=max_frames,
+        min_frames=min_frames,
         shuffle=shuffle,
         seed=seed,
         epoch=epoch,

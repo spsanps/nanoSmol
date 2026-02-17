@@ -30,31 +30,21 @@ def collate_foveated(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
       loss_mask:       [B, S_max]               float32  -- zero-padded
       num_frames:      [B]                      long     -- original frame counts
 
-    Padding conventions:
-      - Frames are padded with zeros (black frames).  frame_mask distinguishes
-        real from padding so the model can ignore them.
-      - Text is padded with 0 on the right.  Most tokenizers reserve 0 for
-        padding; if a different pad token is used, the caller should remap
-        after collation.  attention_mask marks real tokens.
-      - loss_mask is zero-padded so padded positions contribute zero loss.
+    Padding is dynamic per-batch (pad to max in batch, no bucketing).
     """
     if not batch:
         raise ValueError("collate_foveated received an empty batch")
 
     B = len(batch)
 
-    # ------------------------------------------------------------------
-    # Determine max sizes across the batch
-    # ------------------------------------------------------------------
+    # Determine max sizes from this batch
     t_max = max(sample["frames"].shape[0] for sample in batch)
     s_max = max(sample["input_ids"].shape[0] for sample in batch)
 
     # Frame spatial dimensions (should be uniform but read from data)
     _, C, H, W = batch[0]["frames"].shape
 
-    # ------------------------------------------------------------------
     # Allocate output tensors
-    # ------------------------------------------------------------------
     frames = torch.zeros(B, t_max, C, H, W, dtype=torch.float32)
     frame_mask = torch.zeros(B, t_max, dtype=torch.bool)
     input_ids = torch.zeros(B, s_max, dtype=torch.long)
@@ -62,9 +52,7 @@ def collate_foveated(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
     loss_mask = torch.zeros(B, s_max, dtype=torch.float32)
     num_frames = torch.zeros(B, dtype=torch.long)
 
-    # ------------------------------------------------------------------
     # Fill in each sample
-    # ------------------------------------------------------------------
     for i, sample in enumerate(batch):
         t_i = sample["frames"].shape[0]
         s_i = sample["input_ids"].shape[0]

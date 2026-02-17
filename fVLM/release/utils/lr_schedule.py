@@ -93,3 +93,32 @@ def get_cosine_schedule_with_warmup(
         return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
 
     return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
+
+
+def get_constant_schedule_with_warmup(
+    optimizer,
+    num_warmup_steps: int,
+    last_epoch: int = -1,
+):
+    """
+    Constant LR after linear warmup.  Ideal for scaling law runs where
+    intermediate checkpoints should all be comparable (no schedule-dependent
+    loss artifact).
+
+    LR
+    ^
+    |     ___________________________
+    |    /
+    |   /
+    |  /
+    | /
+    |/
+    +------------------------------> step
+    0   warmup     ...
+    """
+    def lr_lambda(current_step: int) -> float:
+        if current_step < num_warmup_steps:
+            return current_step / max(num_warmup_steps, 1)
+        return 1.0
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)

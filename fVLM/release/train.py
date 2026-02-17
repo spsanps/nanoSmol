@@ -27,6 +27,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # TF32 for free speedup on Ampere+ GPUs (RTX 3090, A100, RTX 5090, etc.)
 torch.set_float32_matmul_precision("high")
+torch.backends.cudnn.benchmark = True       # auto-tune conv algorithms (DINO patch embed)
+torch.backends.cudnn.allow_tf32 = True      # TF32 for cuDNN convolutions
+torch.backends.cuda.matmul.allow_tf32 = True  # redundant with set_float32_matmul_precision but explicit
 
 # nanochat: expandable segments for GPU memory allocator
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -46,7 +49,7 @@ from release.utils.distributed import (
     reduce_mean,
 )
 from release.utils.checkpoint import save_checkpoint, load_latest_checkpoint
-from release.utils.lr_schedule import get_cosine_schedule_with_warmup
+from release.utils.lr_schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
 from release.utils.logging_utils import TrainingLogger
 from release.utils.attention_viz import compute_attention_entropy, save_attention_maps
 
@@ -106,6 +109,10 @@ def build_model(cfg: dict, device: torch.device):
 
     model = model.to(device)
 
+    # channels_last for DINO conv layers (patch embedding) — better tensor core util
+    if hasattr(model, 'encoder') and hasattr(model.encoder, 'dino'):
+        model.encoder.dino = model.encoder.dino.to(memory_format=torch.channels_last)
+
     # ---- Freeze parameters based on config ----
     dino_module = getattr(model, 'encoder', None)
     if dino_module is not None:
@@ -146,10 +153,12 @@ def build_train_loader(cfg: dict, epoch: int = 0):
         shard_pattern=cfg["data"]["train_shards"],
         batch_size=cfg["training"]["batch_size"],
         max_frames=cfg["data"].get("max_frames", 64),
+        min_frames=cfg["data"].get("min_frames", 0),
         shuffle=True,
         seed=cfg["training"].get("seed", 42),
         epoch=epoch,
-        num_workers=cfg["data"].get("num_workers", 4),
+        num_workers=cfg["data"].get("num_workers", 12),
+        prefetch_factor=cfg["data"].get("prefetch_factor", 8),
         tokenizer=tokenizer,
         stage=stage,
         replicate_image_frames=cfg["data"].get("replicate_image_frames", 1),
@@ -164,7 +173,8 @@ def build_train_loader(cfg: dict, epoch: int = 0):
             shuffle=True,
             seed=cfg["training"].get("seed", 42),
             epoch=epoch,
-            num_workers=max(1, cfg["data"].get("num_workers", 4) // 2),
+            num_workers=max(1, cfg["data"].get("num_workers", 12) // 2),
+            prefetch_factor=cfg["data"].get("prefetch_factor", 8),
             tokenizer=tokenizer,
             stage=stage,
         )
@@ -189,7 +199,7 @@ def build_val_loader(cfg: dict):
         batch_size=cfg["training"]["batch_size"],
         max_frames=cfg["data"].get("max_frames", 64),
         shuffle=False,
-        num_workers=2,  # val has few shards; keep low to avoid empty-worker crashes
+        num_workers=0,  # load in main process — eval is small, avoids RAM spike
         tokenizer=tokenizer,
         stage=stage,
     )
@@ -289,11 +299,67 @@ def evaluate(model, val_loader, device, amp_dtype, use_amp, cfg,
 
 
 # --------------------------------------------------------------------------- #
+# Throughput: maximize batch size to fill GPU memory
+# --------------------------------------------------------------------------- #
+
+def _maximize_batch_size(cfg: dict, device: torch.device):
+    """
+    Increase batch_size and decrease grad_accum to keep the same effective
+    batch while processing more samples per forward pass.  Larger micro-batches
+    improve GPU utilization by giving the GPU more parallel work.
+
+    The effective batch (batch_size * grad_accum * world_size) stays constant
+    so learning dynamics are unchanged.
+    """
+    bs = cfg["training"]["batch_size"]
+    ga = cfg["training"]["grad_accum"]
+    effective = bs * ga
+
+    # Determine max batch size based on available VRAM
+    if torch.cuda.is_available():
+        total_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
+    else:
+        return
+
+    # Conservative VRAM targets per model size (leave headroom for spikes)
+    llm_path = cfg["model"].get("llm", "")
+    if "1.7B" in llm_path or "1.7b" in llm_path:
+        max_bs = 8   # 1.7B needs gradient checkpointing, limited VRAM
+    elif "360M" in llm_path or "360m" in llm_path:
+        max_bs = min(effective, 16)  # 360M: ~6 GB model+optim, fits bs=16
+    else:
+        # 135M or smaller: model is tiny but video frames dominate VRAM.
+        # DINO processes ALL frames in the batch at once; with bucketed padding
+        # a batch of 32 × 64 padded frames = 2048 images → OOM on 32GB.
+        # bs=16 is a safe 2× improvement over bs=8.
+        max_bs = min(effective, 16)
+
+    if max_bs <= bs:
+        return  # already at or above target
+
+    new_ga = max(1, effective // max_bs)
+    new_bs = effective // new_ga  # adjust to keep effective exact
+
+    if new_bs > bs:
+        if is_main_process():
+            print(f"  [THROUGHPUT] Batch size: {bs}×{ga} → {new_bs}×{new_ga} "
+                  f"(effective={new_bs * new_ga}, was {effective})")
+        cfg["training"]["batch_size"] = new_bs
+        cfg["training"]["grad_accum"] = new_ga
+
+
+# --------------------------------------------------------------------------- #
 # Main training loop
 # --------------------------------------------------------------------------- #
 
 def train(cfg: dict, args):
     rank, world_size, device = setup_distributed()
+
+    # ---- Throughput overrides ----
+    # KEEP IT SIMPLE: only safe code-level opts (TF32, cuDNN, channels_last).
+    # DO NOT override batch_size, num_workers, or prefetch_factor here.
+    # bs=32/16 + high workers caused repeated system OOM crashes.
+    # C1-C3 ran stable for hours at bs=8, workers=2, 43-44 samp/s.
 
     if is_main_process():
         print(f"=== fVLM Training: Stage {cfg['stage']} ===")
@@ -340,11 +406,18 @@ def train(cfg: dict, args):
     total_steps = cfg["training"]["total_samples"] // effective_batch
     warmup_steps = int(total_steps * cfg["training"].get("warmup_ratio", 0.05))
 
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
-    )
+    schedule_type = cfg["training"].get("schedule", "cosine")
+    if schedule_type == "constant":
+        scheduler = get_constant_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+        )
+    else:
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps,
+        )
 
     # ---- Mixed precision ----
     dtype_str = cfg["training"].get("dtype", "float32")
@@ -379,8 +452,12 @@ def train(cfg: dict, args):
     # ---- torch.compile ----
     if cfg["training"].get("compile", False) and hasattr(torch, "compile"):
         if is_main_process():
-            print("  Compiling encoder with torch.compile (dynamic=True) ...")
+            print("  Compiling model with torch.compile (reduce-overhead) ...")
+        # Compile individual components to avoid graph breaks at boundaries
         raw_model.encoder = torch.compile(raw_model.encoder, dynamic=True)
+        raw_model.llm = torch.compile(raw_model.llm, dynamic=True)
+        raw_model.dino_to_llm = torch.compile(raw_model.dino_to_llm)
+        raw_model.llm_to_query = torch.compile(raw_model.llm_to_query)
 
     # ---- Val loader ----
     val_loader = build_val_loader(cfg)

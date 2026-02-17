@@ -129,6 +129,8 @@ class FoveatedEncoder(nn.Module):
                             Each K, V has shape ``[B*T, N+1, D]`` (full dim,
                             not yet reshaped to multi-head).
         """
+        # Convert to channels_last for better conv performance on tensor cores
+        images = images.to(memory_format=torch.channels_last)
         # Patch + position embedding (includes CLS prepend).
         hidden: torch.Tensor = self.dino.embeddings(images)  # [B*T, N+1, D]
 

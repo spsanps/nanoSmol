@@ -79,9 +79,11 @@ def generate_run_configs(template_cfg: dict) -> list:
                     cfg["model"]["gradient_checkpointing"] = True
                     cfg["training"]["batch_size"] = 2
                     cfg["training"]["grad_accum"] = 16
+                    cfg["training"]["compile"] = True  # worth it for large models
                 elif "360M" in size_name:
                     cfg["training"]["batch_size"] = 4
                     cfg["training"]["grad_accum"] = 8
+                    cfg["training"]["compile"] = True  # worth it for 360M+
 
                 # Compute sample count for this FLOP budget
                 num_samples = compute_samples_for_budget(flop_budget, cfg)
@@ -126,6 +128,26 @@ def run_training(cfg: dict, run_id: str, output_dir: str, dry_run: bool = False)
         print(f"  [DRY RUN] {run_id}: {cfg['training']['total_samples']:,} samples, "
               f"{flops:.2e} FLOPs/sample, config at {config_path}")
         return {"run_id": run_id, "status": "dry_run"}
+
+    # Skip if already completed (run_summary exists with valid data)
+    ckpt_dir = Path(cfg["checkpoint"]["save_dir"])
+    summary_files = sorted(ckpt_dir.glob("run_summary_*.json"))
+    if summary_files:
+        with open(summary_files[-1]) as f:
+            prev_summary = json.load(f)
+        if prev_summary.get("best_val_loss") is not None:
+            print(f"\n  [SKIP] {run_id} already completed "
+                  f"(val_loss={prev_summary['best_val_loss']:.4f})")
+            return {
+                "run_id": run_id,
+                "status": "success",
+                "returncode": 0,
+                "wall_time_sec": prev_summary.get("wall_time_sec", 0),
+                "final_train_loss": prev_summary.get("final_train_loss"),
+                "best_val_loss": prev_summary.get("best_val_loss"),
+                "best_val_step": prev_summary.get("best_val_step"),
+                "total_samples": cfg["training"]["total_samples"],
+            }
 
     # Run training
     cmd = [
@@ -238,17 +260,24 @@ def main():
         results.append(result)
 
         # Append to CSV after each run (for incremental monitoring)
-        write_header = not results_csv.exists()
-        with open(results_csv, "a" if not write_header else "w", newline="") as f:
-            fieldnames = [
-                "run_id", "size", "budget", "arch", "flop_budget",
-                "total_samples", "status", "returncode", "wall_time_sec",
-                "final_train_loss", "best_val_loss", "best_val_step",
-            ]
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            if write_header:
-                writer.writeheader()
-            writer.writerow(result)
+        # Skip if this run_id is already in the CSV (from a previous invocation)
+        fieldnames = [
+            "run_id", "size", "budget", "arch", "flop_budget",
+            "total_samples", "status", "returncode", "wall_time_sec",
+            "final_train_loss", "best_val_loss", "best_val_step",
+        ]
+        existing_ids = set()
+        if results_csv.exists():
+            with open(results_csv, newline="") as f:
+                for row in csv.DictReader(f):
+                    existing_ids.add(row.get("run_id"))
+        write_header = not results_csv.exists() or os.path.getsize(results_csv) == 0
+        if result["run_id"] not in existing_ids:
+            with open(results_csv, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(result)
 
     # Final summary
     print(f"\n{'='*60}")

@@ -35,7 +35,8 @@ data:
   text_ratio: 0.14
   max_frames: 64
   frame_size: 224
-  num_workers: 8
+  num_workers: 2               # Higher causes GPU VRAM fragmentation → OOM cascades → 24 samp/s.
+  prefetch_factor: 2           # w=2,pf=2 proven stable at 49 samp/s. w=6 gave 24 samp/s (4318 OOMs).
 
 training:
   total_samples: 300_000                          # overridden by grid
@@ -49,7 +50,7 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: false
+  compile: false                # torch.compile hurts 135M (dynamic shapes); enable for 360M+
   seed: 42
 
 loss:
