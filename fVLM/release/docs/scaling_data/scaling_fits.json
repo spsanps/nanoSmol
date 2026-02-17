@@ -1,0 +1,40 @@
+{
+  "per_size_fits": {
+    "135M": {
+      "a": 3321.80,
+      "b": 0.9261,
+      "E": 1.2790,
+      "n_points": 82,
+      "rmse": 0.058105,
+      "lr_schedule": "cosine",
+      "note": "cosine LR artifacts inflate beta"
+    },
+    "360M": {
+      "a": 3.23,
+      "b": 0.1705,
+      "E": 1.0201,
+      "n_points": 87,
+      "rmse": 0.022723,
+      "lr_schedule": "constant",
+      "note": "clean constant-LR run"
+    }
+  },
+  "joint_chinchilla_fit": {
+    "form": "L(N,D) = E + A/N^alpha + B/D^beta",
+    "E": 1.2903,
+    "A": 48.8977,
+    "B": 96.7511,
+    "alpha": 0.9878,
+    "beta": 0.5819,
+    "rmse": 0.062961,
+    "n_points": 169,
+    "note": "Joint fit unreliable — mixes cosine (135M) and constant (360M) LR schedules. 135M appears better than 360M due to cosine decay, not model capacity."
+  },
+  "chinchilla_reference": {
+    "E": 1.69,
+    "A": 406.4,
+    "B": 410.7,
+    "alpha": 0.34,
+    "beta": 0.28
+  }
+}
