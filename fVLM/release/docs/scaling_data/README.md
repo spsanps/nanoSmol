@@ -36,9 +36,32 @@ Five scaling runs at two model sizes with increasing compute budgets:
 | 135M-scaling | 135M | 157.6M | constant | — | 656K | 1.1923 | Complete |
 | 360M-scaling | 360M | 382.6M | constant | — | 702K | 1.3501 | Complete (LR too high) |
 
+### LR Sweeps (100K samples, cosine schedule)
+
+| Run ID | Model Size | Connector LR | Best Val Loss | Status |
+|--------|-----------|-------------|---------------|--------|
+| 360M-lr-3e4 | 360M | 3e-4 | 1.631 | Complete |
+| 360M-lr-5e4 | 360M | 5e-4 | 1.530 | Complete |
+| 360M-lr-7e4 | 360M | 7e-4 | 1.497 | Complete — **winner** |
+| 1.7B-lr-* | 1.7B | {1-5}e-4 | — | Aborted (OOM on 32GB) |
+
+### Long Video Ablation (50K samples, long videos only)
+
+| Run ID | Mode | Best Val Loss | Trend | Status |
+|--------|------|---------------|-------|--------|
+| longvid_fine | Fine-only | 2.1619 @ step 200 | Overfitting (2.16→2.23) | Complete |
+| longvid_coarse | Coarse-only | **2.1465** @ step 600 | Stable (~2.15) | Complete |
+
+### Frame Replication (A8 sweep, 135M, mixed data)
+
+| Run ID | Frames | Best Val Loss | Status |
+|--------|--------|---------------|--------|
+| A8c | 4 | 2.868 | Complete |
+| A8d | 8 | **2.858** | Complete — **winner** |
+
 *C4 was interrupted at step 12060/~39100 (~31% complete). Its 24 eval points are included.
 **135M-scaling is the corrected rerun with constant LR (matches 360M design).
-***360M-scaling used 135M-tuned LRs (1e-3 connector) — too aggressive. LR sweep in progress.
+***360M-scaling used 135M-tuned LRs (1e-3 connector) — too aggressive. LR sweep confirmed 7e-4 as optimal.
 
 ## Model Configurations
 
@@ -58,10 +81,12 @@ Five scaling runs at two model sizes with increasing compute budgets:
 ## Key Findings
 
 1. **135M constant-LR (1.1923) is the best result so far** — 82 clean eval points, every one valid for scaling law fits.
-2. **360M used wrong LR** — same connector LR (1e-3) as 135M. 360M best (1.3501) barely beats 135M ablation baselines (~1.36). Curves never cross: 135M beats 360M at every sample count. This is a hyperparameter problem, not a model capacity problem.
-3. **LR sweep in progress** — testing 360M with {3e-4, 5e-4, 7e-4} and 1.7B with {1e-4, 2e-4, 3e-4, 5e-4}. Standard heuristic: LR ~ 1/sqrt(N/N_base). Each sweep is 100K samples with cosine schedule + dense evals.
-4. **After LR sweep**: re-run 360M and 1.7B full scaling runs with winning LRs → proper 3-point Chinchilla fit.
-5. **C1-C3 (cosine)** have LR schedule artifacts making them non-comparable with constant-LR runs. C4 (interrupted) was on a strong trajectory but only 31% complete.
+2. **360M used wrong LR** — same connector LR (1e-3) as 135M was too aggressive. LR sweep confirmed 7e-4 as optimal for 360M (1.497 vs 1.631 at 3e-4).
+3. **360M LR sweep complete** — 7e-4 wins. Need full rerun with correct LR for proper scaling law fit.
+4. **1.7B doesn't fit on RTX 5090** — even bs=1 with gradient checkpointing OOMs. Deferred to A100 80GB.
+5. **Coarse-only beats fine-only on long videos** — 2.1465 vs 2.1619. Fine pass overfits; coarse stays stable.
+6. **N=8 frame replication wins** for images in video training (2.858 vs 2.868 at N=4). Small delta but consistent.
+7. **C1-C3 (cosine)** have LR schedule artifacts making them non-comparable with constant-LR runs.
 
 ## Column Reference
 
