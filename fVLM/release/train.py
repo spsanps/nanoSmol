@@ -412,6 +412,17 @@ def train(cfg: dict, args):
             optimizer,
             num_warmup_steps=warmup_steps,
         )
+    elif schedule_type == "converging":
+        # Stage 1: connector 100:1 → 1:1 convergence with backbone
+        target_lr = cfg["training"].get("target_lr", 3e-5)
+        scheduler = get_converging_schedule(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps,
+            target_lr=target_lr,
+        )
+        if is_main_process():
+            print(f"  Schedule: converging to target_lr={target_lr} (100:1 → 1:1)")
     else:
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,

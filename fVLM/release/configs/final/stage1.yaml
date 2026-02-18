@@ -1,0 +1,80 @@
+# =============================================================================
+# FINAL Stage 1: Visual Alignment (Video Pre-training)
+# =============================================================================
+# Purpose: Teach foveated query mechanism + visual grounding on video captions.
+# Loss: All-text CE (predict all tokens — entire caption is the target).
+# Data: OpenVid-1M (905K) + WebVid (19K) + 14% SmolTalk S1 text retention.
+#
+# LR STRATEGY (converging schedule):
+#   Start: connector=1e-3, backbone=1e-5 (100:1 ratio)
+#   End:   all groups converge to target_lr=3e-5 (1:1 ratio)
+#   Rationale: Randomly-initialized connector needs fast start. By end of
+#   Stage 1, all components should be at matched rates — ready for Stage 2+
+#   flat LR (SmolVLM2 style).
+#
+# Honest conditioning: "What would be the WebVid caption for this video?"
+#
+# ===== EVIDENCE STATUS =====
+# ABLATION-BACKED: architecture, 100:1 initial ratio, video-heavy mix,
+#   full unfreeze, 14% text retention
+# TBD: model size (LR sweep), absolute LR (LR sweep), total_samples (scaling)
+# HARDWARE-DEPENDENT: batch_size, workers, compile
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/${MODEL}          # TBD: SmolLM2-{135M,360M,1.7B}-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false            # true for 1.7B
+
+data:
+  train_shards:
+    - "/workspace/data/openvid/*.tar"      # 905K video samples
+    - "/workspace/data/webvid/*.tar"        # 19K video (small supplement)
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 2                           # tune per hardware
+  prefetch_factor: 2
+
+training:
+  total_samples: 1_000_000                 # shorter Stage 1 — just alignment
+  batch_size: 8                            # tune per hardware + model size
+  grad_accum: 4
+  lr_connector: 1.0e-3                     # TBD: from LR sweep
+  lr_dino: 1.0e-5                          # 100:1 start ratio
+  lr_llm: 1.0e-5                           # 100:1 start ratio
+  target_lr: 3.0e-5                        # converge to this (SmolVLM2 baseline)
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: converging                     # 100:1 → 1:1 over Stage 1
+  dtype: bfloat16
+  compile: false
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/final/stage1
+  save_every_steps: 2000
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 500
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-final
+  run_name: stage1-${MODEL_SIZE}

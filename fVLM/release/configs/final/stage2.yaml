@@ -1,0 +1,72 @@
+# =============================================================================
+# FINAL Stage 2: Vision-Language SFT (Image Instruction Tuning)
+# =============================================================================
+# Purpose: Learn to answer questions about images.
+# Loss: Answer-only CE (mask user/system tokens).
+# Data: Cauldron full (2M, subsample to ~850K) + 14% SmolTalk S2.
+# Init: Best Stage 1 checkpoint.
+#
+# LR STRATEGY (flat 1:1, SmolVLM2 style):
+#   All groups at 3e-5 with cosine decay.
+#   By Stage 2, connector is trained — no need for differential LR.
+#   SmolVLM2 uses flat 3e-5 for all stages.
+#
+# Images replicated to 8 frames (A8 sweep winner).
+# =============================================================================
+
+stage: 2
+
+model:
+  llm: /workspace/models/${MODEL}
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false
+  init_from: /workspace/checkpoints/final/stage1/best.pt
+
+data:
+  train_shards: "/workspace/data/cauldron_full/*.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage2/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 2                           # tune per hardware
+  prefetch_factor: 2
+  replicate_image_frames: 8               # A8 sweep winner
+
+training:
+  total_samples: 1_000_000
+  batch_size: 8
+  grad_accum: 4
+  lr_connector: 3.0e-5                     # flat 1:1 (SmolVLM2 style)
+  lr_dino: 3.0e-5                          # same as connector
+  lr_llm: 3.0e-5                           # same as connector
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: cosine                         # standard cosine decay
+  dtype: bfloat16
+  compile: false
+  seed: 42
+
+loss:
+  type: text_ce_answer_only
+
+checkpoint:
+  save_dir: /workspace/checkpoints/final/stage2
+  save_every_steps: 2000
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 500
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-final
+  run_name: stage2-${MODEL_SIZE}

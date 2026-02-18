@@ -19,7 +19,7 @@ from release.utils.checkpoint import (
     load_latest_checkpoint,
     cleanup_checkpoints,
 )
-from release.utils.lr_schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
+from release.utils.lr_schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup, get_converging_schedule
 from release.utils.logging_utils import TrainingLogger
 from release.utils.flop_counter import estimate_flops_per_sample
 
@@ -32,6 +32,7 @@ __all__ = [
     "cleanup_checkpoints",
     "get_cosine_schedule_with_warmup",
     "get_constant_schedule_with_warmup",
+    "get_converging_schedule",
     "TrainingLogger",
     "estimate_flops_per_sample",
 ]

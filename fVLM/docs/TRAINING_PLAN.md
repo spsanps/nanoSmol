@@ -10,7 +10,7 @@
 
 ```
 Phase 1a: Ablations           ✓ DONE (13 runs, config decisions locked)
-Phase 1b: Scaling grid         ← IN PROGRESS (135M cosine done, 360M constant done, need 135M constant rerun)
+Phase 1b: Scaling grid         ← IN PROGRESS (135M constant done ✓, 360M/1.7B LR sweep running)
   → Pick model size
 Full training: Stage 1 → 2 → 3
 Eval: 3-mode benchmarks
@@ -27,7 +27,8 @@ Release: HuggingFace + blog
 | **Connector LR ratio** | 100:1 (connector=1e-3, backbone=1e-5) | LR2 (1.332) beat baseline 10:1 (1.361) |
 | **Architecture** | Deep query + fine pass (full two-pass) | Kept for thesis. A1v2 shallow was competitive (1.349) but deep query needed at scale |
 | **Data mix** | Video-heavy (55% video / 30% image / 15% text) | D1 (1.312) was best overall |
-| **Model size** | TBD from Phase 1b scaling curves | Need 135M constant-LR rerun first |
+| **Model size** | TBD from Phase 1b scaling curves | 135M done (1.1923), 360M/1.7B LR sweep in progress |
+| **Image frame replication** | **N=8** | A8 sweep: N=8 (2.858) > N=4 (2.868) > N=1 (3.027) > N=16 (3.049) |
 
 ---
 
@@ -66,9 +67,9 @@ Run (1) first (already planned), then (4) and (5) can run in parallel. Benchmark
 |------|------|
 | **Purpose** | Teach foveated query mechanism + visual grounding |
 | **Loss** | All-text CE (predict all tokens) |
-| **LR** | 100:1 differential (connector=1e-3, DINO=1e-5, LLM=1e-5) |
+| **LR** | Converging: connector=1e-3 → 3e-5, backbone=1e-5 → 3e-5 (100:1 → 1:1) |
 | **Freeze** | Nothing — full fine-tuning |
-| **Samples** | ~2M (TBD by scaling curve plateau analysis) |
+| **Samples** | ~1M (shorter Stage 1 — just alignment, not full training) |
 
 **Data:**
 
@@ -99,7 +100,7 @@ This teaches visual grounding without polluting the model's conversational style
 |------|------|
 | **Purpose** | Learn to answer questions about images and video |
 | **Loss** | Answer-only CE (mask user/system tokens) |
-| **LR** | Same differential LR, possibly lower overall (TBD) |
+| **LR** | Flat 3e-5 all components (1:1, SmolVLM2 style) + cosine decay |
 | **Freeze** | Full fine-tuning |
 | **Samples** | ~1M |
 
@@ -120,10 +121,10 @@ This teaches visual grounding without polluting the model's conversational style
 |------|------|
 | **Purpose** | Temporal reasoning, narrative understanding |
 | **Loss** | Answer-only CE |
-| **LR** | Same differential LR, possibly lower overall |
+| **LR** | Flat 3e-5 all components (1:1, SmolVLM2 style) + cosine decay |
 | **Freeze** | Full fine-tuning |
 | **Samples** | ~0.5M |
-| **Mix target** | ~55% video / ~30% image / ~15% text (video-heavy, per D1 winner) |
+| **Mix target** | ~55% video / ~30% image / ~15% text (video-heavy, per D1 winner — not ablated for Stage 3) |
 
 **Data:**
 
@@ -166,7 +167,7 @@ This teaches visual grounding without polluting the model's conversational style
 | **Frame count** | Variable: `min(video_duration_seconds, 64)` |
 | **Long video fallback** | Videos >64s: uniform spacing (evenly spaced, still 64 max) |
 | **Resolution** | 224×224 (DINOv2-small native) |
-| **Images in training** | Replicated to N frames (N = TBD from A8 results: 1, 4, 8, 16) |
+| **Images in training** | Replicated to **8 frames** (A8 sweep: N=8 best at 2.858, N=4 close at 2.868, N=1/16 worse) |
 
 ---
 
@@ -182,8 +183,8 @@ This teaches visual grounding without polluting the model's conversational style
 | visual_scale | 0.14 | Matches LLM embedding std |
 | Loss | Text CE only | No reconstruction, no VAE, no auxiliary loss |
 | Text retention | 14% SmolTalk in ALL stages | Removing hurts 3.7-6.5% (SmolVLM2 finding) |
-| Connector LR | 100:1 ratio | Ablation winner (LR2) |
-| Data mix | Video-heavy | Ablation winner (D1) |
+| Connector LR | Stage 1: converging 100:1→1:1. Stage 2+: flat 1:1 (3e-5) | LR2 ablation + SmolVLM2 recipe |
+| Data mix | Video-heavy | Ablation winner (D1) — Stage 1 only, Stage 2-3 not ablated |
 
 ---
 
@@ -236,7 +237,7 @@ Before spending ~$250+ on full 3-stage training:
 - [x] Foveated beats coarse-only — confirmed (small but consistent gap)
 - [x] Val loss curves converge at ablation budget — yes
 - [x] No divergence with full unfreeze — stable across all runs
-- [ ] Scaling grid shows clear compute-optimal size — **need 135M constant-LR rerun**
+- [ ] Scaling grid shows clear compute-optimal size — 135M done (1.1923), 360M/1.7B LR sweep running, then full scaling reruns
 - [x] Training infrastructure stable — 13 successful ablation runs
 
 ---
