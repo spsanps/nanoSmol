@@ -230,6 +230,34 @@ SmolTalk is split into 3 stages that match our training stages:
 
 ---
 
+## Execution Strategy
+
+### Step 1: Smallest model first (135M), hyperoptimize on 2 GPUs
+Full 3-stage training on 135M. This is cheap and validates everything:
+- Converging LR schedule
+- Data mix per stage
+- Stage transitions (init_from)
+- Throughput tuning (workers, batch_size, compile on target hardware)
+- End-to-end benchmark eval pipeline
+
+### Step 2: Quick ablations AFTER Stage 1 completes
+Before committing to full Stage 2, run 2-3 quick ablations (~100K samples each):
+- Stage 2 LR: flat 3e-5 vs flat 1e-4 vs converging carryover
+- Stage 2 data: full Cauldron vs Cauldron subsample vs Cauldron + video mix
+This takes ~3h and saves potentially wasted Stage 2 compute.
+
+### Step 3: Complete 135M Stage 2 → 3 → eval → benchmarks
+Pick best Stage 2 config from ablations, run through to completion.
+Full benchmark eval on MVBench + Video-MME.
+
+### Step 4: Educated guess for larger model
+Scale from 135M findings using standard heuristics:
+- LR: scale by ~1/sqrt(N_big/N_small) from 135M optimal
+- Data: same composition, more samples (Chinchilla-proportional)
+- Batch size: adjust for VRAM
+- Schedule: same converging→flat pattern
+This is an informed guess, not a guaranteed optimum. One shot.
+
 ## Go/No-Go Before Full Training
 
 Before spending ~$250+ on full 3-stage training:
@@ -238,6 +266,7 @@ Before spending ~$250+ on full 3-stage training:
 - [x] Val loss curves converge at ablation budget — yes
 - [x] No divergence with full unfreeze — stable across all runs
 - [ ] Scaling grid shows clear compute-optimal size — 135M done (1.1923), 360M/1.7B LR sweep running, then full scaling reruns
+- [ ] 135M full 3-stage training succeeds end-to-end — validates pipeline
 - [x] Training infrastructure stable — 13 successful ablation runs
 
 ---
