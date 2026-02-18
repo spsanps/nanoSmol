@@ -30,9 +30,9 @@ data:
   prefetch_factor: 2
 
 training:
-  total_samples: 150_000
-  batch_size: 8
-  grad_accum: 4
+  total_samples: 50_000
+  batch_size: 4
+  grad_accum: 8
   lr_connector: 1.0e-3
   lr_dino: 1.0e-5
   lr_llm: 1.0e-5

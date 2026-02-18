@@ -25,8 +25,8 @@ data:
 
 training:
   total_samples: 100_000
-  batch_size: 2
-  grad_accum: 16
+  batch_size: 1
+  grad_accum: 32
   lr_connector: 1.0e-4
   lr_dino: 1.0e-6
   lr_llm: 1.0e-6

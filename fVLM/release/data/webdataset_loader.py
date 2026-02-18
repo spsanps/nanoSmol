@@ -402,6 +402,7 @@ def create_webdataset(
         shardshuffle=shardshuffle if shuffle else False,
         seed=effective_seed if shuffle else None,
         empty_check=False,  # avoid crash when workers get no valid samples
+        handler=wds.warn_and_continue,  # skip corrupted shards instead of crashing
     )
 
     if shuffle:
