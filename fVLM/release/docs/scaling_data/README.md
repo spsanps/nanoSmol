@@ -84,9 +84,26 @@ Five scaling runs at two model sizes with increasing compute budgets:
 2. **360M used wrong LR** — same connector LR (1e-3) as 135M was too aggressive. LR sweep confirmed 7e-4 as optimal for 360M (1.497 vs 1.631 at 3e-4).
 3. **360M LR sweep complete** — 7e-4 wins. Need full rerun with correct LR for proper scaling law fit.
 4. **1.7B doesn't fit on RTX 5090** — even bs=1 with gradient checkpointing OOMs. Deferred to A100 80GB.
-5. **Coarse-only beats fine-only on long videos** — 2.1465 vs 2.1619. Fine pass overfits; coarse stays stable.
-6. **N=8 frame replication wins** for images in video training (2.858 vs 2.868 at N=4). Small delta but consistent.
+5. **Longvid fine vs coarse is INCONCLUSIVE** — val_loss showed coarse winning (2.147 vs 2.162) but train losses are equivalent (1.994 vs 1.981). The val_loss difference was an artifact of distribution mismatch (trained on 30-64 frame videos, evaluated on mixed data with mean 5.7 frames). See "Val Set Mismatch" section below.
+6. **N=8 frame replication wins** for images in video training — confirmed on both train loss (1.330 vs 1.371) and val loss (2.858 vs 2.868).
 7. **C1-C3 (cosine)** have LR schedule artifacts making them non-comparable with constant-LR runs.
+
+## Val Set Mismatch Analysis
+
+**val_10k composition**: ~49% video (mean 5.7 frames), ~51% image/text (Cauldron, SmolTalk). Sources include OpenVid, LLaVA-Video, WebVid, Cauldron, SmolTalk.
+
+Most experiments train on video data (OpenVid + Vript + ShareGPT4Video) but val_10k includes Cauldron images not in training. This creates a consistent bias: val_loss is inflated for all video-training runs. However, since the bias is consistent, **relative rankings remain valid** — confirmed by checking that train-loss rankings match val-loss rankings across all experiment groups.
+
+| Experiment group | Train-val gap | Rankings agree? | Notes |
+|-----------------|---------------|-----------------|-------|
+| Phase 1a ablations | ~0.7 | YES | All conclusions hold |
+| A8 frame replication | ~1.5 | YES (N=8 wins both) | Large gap: trains on images only |
+| 360M LR sweep | 0.8–1.0 | YES (7e-4 wins both) | Large gap: short runs (100K) |
+| 135M scaling | 0.07 | — | Healthy gap |
+| 360M scaling | 0.51 | — | Overfit (wrong LR) |
+| **Longvid** | **0.15–0.18** | **NO** | **Train: fine≈coarse; val: coarse "wins"** |
+
+**Lesson**: Always cross-check val_loss conclusions against train_loss, especially when training data distribution differs from val_10k. For future experiments with specialized data, consider building a matched validation set.
 
 ## Column Reference
 
