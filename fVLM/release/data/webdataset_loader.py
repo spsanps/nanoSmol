@@ -168,10 +168,20 @@ def decode_sample(sample: dict, max_frames: int = 64,
 
         if user_text or assistant_text:
             # Has structured user/assistant format
-            if stage == 1:
-                # Stage 1: all-text loss. Combine user+assistant as caption.
+            is_text_only = meta.get("frame_count", 0) == 0
+            if stage == 1 and not is_text_only:
+                # Stage 1 visual data: honest conditioning prompt
                 caption = f"{user_text} {assistant_text}".strip() if user_text else assistant_text
                 tok = tokenize_stage1(caption, tokenizer=tokenizer)
+            elif stage == 1 and is_text_only:
+                # Stage 1 text retention: keep proper chat format, all-text loss
+                tok = tokenize_sft(
+                    user_text,
+                    assistant_text,
+                    stage=stage,
+                    tokenizer=tokenizer,
+                )
+                tok["loss_mask"] = [1] * len(tok["token_ids"])
             else:
                 # Stage 2-3: answer-only loss on assistant portion
                 tok = tokenize_sft(

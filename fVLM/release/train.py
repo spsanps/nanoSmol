@@ -49,7 +49,7 @@ from release.utils.distributed import (
     reduce_mean,
 )
 from release.utils.checkpoint import save_checkpoint, load_latest_checkpoint
-from release.utils.lr_schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
+from release.utils.lr_schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup, get_converging_schedule
 from release.utils.logging_utils import TrainingLogger
 from release.utils.attention_viz import compute_attention_entropy, save_attention_maps
 
