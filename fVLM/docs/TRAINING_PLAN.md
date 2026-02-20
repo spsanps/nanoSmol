@@ -2,7 +2,7 @@
 
 **This is the SINGLE source of truth for all training decisions.** If other docs (SCALING_PLAN.md, GPU_PHASE1_PLAN.md, DATA_SOURCES.md) conflict with this, THIS wins.
 
-**Last updated:** 2026-02-17
+**Last updated:** 2026-02-20
 
 ---
 
@@ -10,12 +10,57 @@
 
 ```
 Phase 1a: Ablations           ✓ DONE (13 runs, config decisions locked)
-Phase 1b: Scaling grid         ← IN PROGRESS (135M constant done ✓, 360M/1.7B LR sweep running)
-  → Pick model size
-Full training: Stage 1 → 2 → 3
-Eval: 3-mode benchmarks
-Release: HuggingFace + blog
+Phase 1b: Scaling grid         ✓ DONE (135M selected, 360M LR=7e-4, 1.7B deferred/OOM)
+Full training: Stage 1          ✓ DONE (1M samples, 4.5h, val_loss=1.2358)
+Full training: Stage 2          ✓ DONE (1M samples, 7.6h, train_loss=0.040)
+Full training: Stage 3 (DPO)    ← FINISHING (RLAIF-V 83K, step 1500/2593, resuming)
+Eval: 3-mode benchmarks         Pending
+Release: HuggingFace + blog     Pending
 ```
+
+---
+
+## Changes Made During Training (Feb 18-20)
+
+These are decision changes from the original plan, made during actual training:
+
+| Change | Old | New | Rationale |
+|--------|-----|-----|-----------|
+| **Val eval** | Val every 500 steps on val_10k | Train loss only (no val) for Stages 2-3 | Val set mismatch: val_10k is mixed data, misleading when training distribution differs. Train loss rankings matched val rankings in all experiments except longvid. Saves ~6min/1M samples. |
+| **Stage 2 data** | Cauldron-only (image VQA) | Cauldron + ALL video data (~55% image, ~45% video) | Video SFT folded into Stage 2 instead of separate Stage 3. Maximizes data utilization. |
+| **Stage 3** | Video SFT (VISTA + Vript + ShareGPT4Video) | DPO on RLAIF-V (83K preference pairs, beta=0.1) | Video data moved to Stage 2. Stage 3 becomes preference alignment. |
+| **Stage 1 workers** | 2 workers, prefetch 2 | 6 workers, prefetch 4 | Throughput optimization (BUG-011 fix) |
+| **Stage 1 system prompt** | SmolLM default | "You are a helpful AI assistant." | Override SmolLM2's "named SmolLM, trained by Hugging Face" |
+| **Text retention (Stage 1)** | All text wrapped in WebVid prompt | Proper chat format for text-only samples | Bug: SmolTalk was getting "What would be the WebVid caption?" prompt |
+| **torch.compile** | Enabled | Disabled for all stages | 135M too small: 40% throughput regression. Dynamic frame counts cause recompilation. |
+| **Longvid conclusion** | "Coarse-only wins" | INCONCLUSIVE | Train losses equivalent (fine=1.981, coarse=1.994). Val difference was distribution artifact. |
+
+### Config (yaml) changes with rationale:
+
+**stage1_135M.yaml:**
+- `num_workers: 2→6, prefetch_factor: 2→4` — throughput bottleneck was data loading, not GPU. Fixed ~30% speedup.
+- `eval.every_steps: 250→500` — evals were too frequent, wasting ~6 min per 1M samples.
+- `compile: false` — was already false but comment clarified: 135M too small, dynamic frame counts cause recompilation.
+
+**stage2_135M.yaml:**
+- `train_shards: single cauldron → list of ALL data sources` — video SFT data folded into Stage 2 (Cauldron + OpenVid + WebVid + VISTA + Vript + ShareGPT4Video + LLaVA YouTube). Rationale: avoids a separate video SFT stage, model sees everything in one pass.
+- `val_shards: removed` — no validation. Train loss only. Val set mismatch makes val_loss misleading when training distribution is broader than val_10k.
+- `compile: true→false` — 135M model is too small for torch.compile, 40% throughput regression measured.
+- `metric: val_loss→train_loss` — follows from removing val.
+
+**stage3_135M.yaml (complete rewrite):**
+- Was: Video SFT (VISTA + Vript + ShareGPT4Video + Cauldron + SmolTalk, 500K samples, answer-only CE, LR 3e-5)
+- Now: DPO on RLAIF-V (83K preference pairs, beta=0.1, LR 1e-6, frozen reference model)
+- Rationale: Video data moved to Stage 2. Stage 3 becomes preference alignment. DPO LR is 30x lower than SFT (standard practice). Batch size halved (4 from 8) because DPO processes chosen+rejected per sample (2x memory).
+- `text_shards/text_ratio: removed` — DPO doesn't use text retention interleaving.
+- `loss.type: text_ce_answer_only→dpo` — triggers DPO training loop with reference model.
+
+### Code changes (uncommitted, +812 lines):
+- `train.py`: DPO training loop, reference model builder, DPO loss function (+285 lines)
+- `foveated_vlm.py`: `forward_dpo()` method — shared DINO encoding for chosen/rejected (+129 lines)
+- `collate.py`: `collate_dpo()` for preference pair batching (+81 lines)
+- `webdataset_loader.py`: `create_dpo_webdataset()` + DPO sample decoding (+255 lines)
+- `precompute.py`: Updates for RLAIF-V shard generation (+50 lines)
 
 ---
 
@@ -32,30 +77,18 @@ Release: HuggingFace + blog
 
 ---
 
-## Phase 1b: What Remains
+## Phase 1b: Results (DONE)
 
-### Scaling
+| Experiment | Result | Status |
+|-----------|--------|--------|
+| 135M constant-LR | val_loss=1.1923, 82 eval points | Done |
+| 360M LR sweep | 3e-4: 1.631, 5e-4: 1.530, **7e-4: 1.497** | Done, 7e-4 wins |
+| 1.7B LR sweep | OOM on RTX 5090 (32GB), even bs=1 | Deferred to A100 |
+| A8 frame replication | N=8 (2.858) > N=4 (2.868) | Done, N=8 locked |
+| Longvid fine vs coarse | INCONCLUSIVE (train losses equivalent, val artifact) | Done |
 
-1. **135M constant-LR rerun** (~8h) — current 135M used cosine, 360M used constant. Can't compare until both match.
-2. **Analyze scaling curves** → pick model size (135M vs 360M)
-3. 1.7B deferred to A100 if budget allows
-
-### Experiments blocking full training decisions
-
-4. **A8 image frame replication: N=4 and N=8** — We have N=1 (A8a) and N=16 (A8b) from Phase 1a. Need intermediate points to find the sweet spot for `replicate_image_frames` in Stage 2-3. Run on Cauldron image data, same setup as A8a/A8b. There is NO multi-token experiment — the architecture is always foveated. Replicated frames with diverse dynamic queries IS how foveated handles images.
-
-5. **Coarse vs fine on long videos only** — Validates fine pass where it should matter most.
-
-   **Dataset:** Vript Long (400K samples, `/workspace/data/vript_long_shards/`). Filter to `frame_count >= 30` (30-64 frames, i.e. 30+ second clips). Vript Long is purpose-built as long video clips — better than OpenVid (avg ~7 frames, mostly short) or LLaVA-Video (67% truncated at 64-frame cap = lossy).
-
-   **Runs:** baseline (deep+fine) vs A6-style (deep+coarse_only) on this filtered subset, same sample count, same config otherwise.
-
-   **Hypothesis:** Fine pass gap widens with video length because more temporal diversity means static queries can't cover everything. At 300K mixed samples (short+long, Phase 1a) the gap was only 0.008 — it should be larger when isolated to long videos where temporal attention actually matters.
-
-   **Paper result:** If coarse≈fine on short videos but fine>>coarse on long videos → "foveation matters most when temporal complexity is high." Clean, publishable finding.
-
-### Priority order
-Run (1) first (already planned), then (4) and (5) can run in parallel. Benchmarks come after full Stage 3 training.
+### Val Set Mismatch Finding
+val_10k is ~49% video (mean 5.7 frames), ~51% image/text. Train-loss rankings agree with val-loss rankings for ALL experiments EXCEPT longvid (trained on 30-64 frame videos, evaluated on mixed). Lesson: cross-check val conclusions against train loss when distributions differ.
 
 ---
 
@@ -79,83 +112,76 @@ Run (1) first (already planned), then (4) and (5) can run in parallel. Benchmark
 | WebVid (valid) | 19K | Video caption | Small supplement |
 | SmolTalk S1 | ~280K (14%) | Text only | Instruction retention |
 
-**Honest conditioning (prompt format):**
+**System prompt:** All stages use an explicit system message: `"You are a helpful AI assistant."` This overrides SmolLM2's default chat template which injects "named SmolLM, trained by Hugging Face."
 
-Stage 1 captions are noisy stock-video-ese ("4K aerial drone footage..."). Do NOT pretend these are natural descriptions. Frame the task honestly:
+**Per-source conditioning (prompt format):**
 
-```
-<|user|>What would be the WebVid caption for this video?<|end|>
-<|assistant|>4K aerial drone footage of beautiful sunset over ocean waves stock video<|end|>
-```
+Different datasets have different caption/response styles. Each source gets a prompt that matches its output style, so the model learns *when* to use each style rather than conflating them:
 
-This teaches visual grounding without polluting the model's conversational style. Stage 2-3 teaches real description/QA skills via properly formatted data.
+| Source | User Prompt | Response Style |
+|--------|------------|----------------|
+| OpenVid | "Write a brief caption for this video." | Stock video captions ("4K aerial drone footage...") |
+| WebVid | "What would be the WebVid caption for this video?" | Stock video captions (honest conditioning) |
+| Vript | "Provide a detailed narration of what happens in this video." | Temporal narrations ("The clip begins with...") |
+| ShareGPT4Video | "Describe what happens in this video in detail." | Detailed video descriptions |
+| VISTA / Cauldron / LLaVA YouTube | *(use existing user field)* | Proper QA — already instruction-formatted |
+| SmolTalk | *(use existing user field)* | Chat responses — already instruction-formatted |
 
-**Do NOT rewrite captions.** Expensive and unnecessary — the honest framing handles the distribution mismatch.
+Stage 1 captions are noisy stock-video-ese. The per-source prompts teach visual grounding without polluting the model's conversational style. Stage 2-3 teaches real description/QA skills via properly formatted data.
+
+**Do NOT rewrite captions.** Expensive and unnecessary — the per-source conditioning handles the distribution mismatch.
 
 ---
 
-### Stage 2: Vision-Language SFT
+### Stage 2: Vision-Language SFT (DONE)
 
 | Item | Spec |
 |------|------|
-| **Purpose** | Learn to answer questions about images and video |
+| **Purpose** | Learn to answer questions about images AND video |
 | **Loss** | Answer-only CE (mask user/system tokens) |
 | **LR** | Flat 3e-5 all components (1:1, SmolVLM2 style) + cosine decay |
 | **Freeze** | Full fine-tuning |
 | **Samples** | ~1M |
+| **Result** | train_loss=0.040 @ step 27000, 7.6h on RTX 5090 |
+| **Eval** | Train loss only (no val — see val mismatch finding) |
 
-**Data:**
-
-| Dataset | Samples | Type | Notes |
-|---------|---------|------|-------|
-| Cauldron (full) | ~2.0M → subsample to ~850K | Image VQA | Already instruction-formatted |
-| SmolTalk S2 | ~140K (14%) | Text only | Instruction retention |
-
-**Prompt format:** Cauldron data is already `{"user": "...", "assistant": "..."}` formatted. Use as-is.
-
----
-
-### Stage 3: Video SFT
-
-| Item | Spec |
-|------|------|
-| **Purpose** | Temporal reasoning, narrative understanding |
-| **Loss** | Answer-only CE |
-| **LR** | Flat 3e-5 all components (1:1, SmolVLM2 style) + cosine decay |
-| **Freeze** | Full fine-tuning |
-| **Samples** | ~0.5M |
-| **Mix target** | ~55% video / ~30% image / ~15% text (video-heavy, per D1 winner — not ablated for Stage 3) |
-
-**Data:**
+**Data (CHANGED from original plan — video folded in):**
 
 | Dataset | Samples | Type | Notes |
 |---------|---------|------|-------|
+| Cauldron (full) | ~2.0M | Image VQA | Already instruction-formatted |
+| OpenVid-1M | 905K | Video caption | From Stage 1 data |
+| WebVid | 19K | Video caption | Small supplement |
 | VISTA (main + extra) | ~237K | Video temporal QA | MIT license |
-| Vript (long + short) | ~411K → subsample | Video caption | Temporal narration |
+| Vript (long + short) | ~411K | Video caption | Temporal narration |
 | ShareGPT4Video | ~37K | Video caption | Short clips |
 | LLaVA YouTube | ~22K | Video SFT | Pre-tokenized |
-| Cauldron (subsample) | ~image portion | Image VQA | Retain image capability |
-| SmolTalk S3 | ~70K (14%) | Text only | Instruction retention |
+| SmolTalk S2 | ~140K (14%) | Text only | Instruction retention |
 
-**Prompt format:** These datasets are already instruction-formatted. Use as-is.
-
-### Video Filtering Rules
-
-**Exclude truncated videos from Stage 3.** Videos that hit the 64-frame cap (i.e., videos >64 seconds that got uniformly subsampled) lose temporal information. This matters most in Stage 3 where temporal reasoning is the goal.
-
-- **LLaVA-Video-178K: EXCLUDED from Stage 3.** 67% of its videos hit the 64-frame cap → noisy signal for temporal reasoning.
-- General rule: if a dataset has >50% cap-hitting videos, exclude from Stage 3 or filter to short clips only.
-- Stage 1 is less sensitive (learning visual grounding, not temporal reasoning), so truncated videos are acceptable there.
+**Rationale for merging video into Stage 2:** Avoids a separate video SFT stage. The model sees images + video + text simultaneously, learning answer-only CE on all of them. Stage 3 then becomes preference alignment (DPO).
 
 ---
 
-### Optional: DPO
+### Stage 3: DPO (IN PROGRESS — was originally "Video SFT")
 
 | Item | Spec |
 |------|------|
-| **Data** | RLAIF-V (83K image preference pairs) |
-| **Method** | DPO with LoRA or full fine-tuning |
-| **When** | After Stage 3, only if hallucination is a problem |
+| **Purpose** | Preference alignment, reduce hallucination |
+| **Loss** | DPO (beta=0.1) |
+| **LR** | 1e-6 all components + cosine decay |
+| **Freeze** | Full fine-tuning (reference model frozen) |
+| **Samples** | 83K (1 epoch RLAIF-V) |
+| **Init** | Stage 2 best checkpoint (step 27000) |
+| **Reference** | Frozen copy of Stage 2 best |
+| **Progress** | Resuming from step 1500/2593, rew_acc ~0.68 |
+
+**Data:**
+
+| Dataset | Samples | Type | Notes |
+|---------|---------|------|-------|
+| RLAIF-V | 83K | Image preference pairs (chosen + rejected) | Full fine-tuning DPO |
+
+**Note:** Original plan had Video SFT here. Video data was moved to Stage 2 instead. DPO was originally "optional after Stage 3" but promoted to Stage 3 itself.
 
 ---
 
@@ -232,42 +258,33 @@ SmolTalk is split into 3 stages that match our training stages:
 
 ## Execution Strategy
 
-### Step 1: Smallest model first (135M), hyperoptimize on 2 GPUs
-Full 3-stage training on 135M. This is cheap and validates everything:
-- Converging LR schedule
-- Data mix per stage
-- Stage transitions (init_from)
-- Throughput tuning (workers, batch_size, compile on target hardware)
-- End-to-end benchmark eval pipeline
+### Step 1: 135M full pipeline ← DONE
+- Stage 1: 1M samples, converging LR, 4.5h ✓
+- Stage 2: 1M samples, flat 3e-5, 7.6h ✓
+- Stage 3: DPO 83K samples, finishing ← IN PROGRESS
+- Throughput: ~48 samp/s Stage 1, ~43 samp/s Stage 2, ~23 samp/s Stage 3 (DPO)
+- torch.compile: disabled (135M too small, 40% regression)
 
-### Step 2: Quick ablations AFTER Stage 1 completes
-Before committing to full Stage 2, run 2-3 quick ablations (~100K samples each):
-- Stage 2 LR: flat 3e-5 vs flat 1e-4 vs converging carryover
-- Stage 2 data: full Cauldron vs Cauldron subsample vs Cauldron + video mix
-This takes ~3h and saves potentially wasted Stage 2 compute.
+### Step 2: Eval + HuggingFace upload ← NEXT
+- Upload final model to HuggingFace
+- Run 3-mode benchmarks (coarse, coarse→fine, autoregressive)
+- MVBench + Video-MME
 
-### Step 3: Complete 135M Stage 2 → 3 → eval → benchmarks
-Pick best Stage 2 config from ablations, run through to completion.
-Full benchmark eval on MVBench + Video-MME.
+### Step 3: Scale to larger model
+- 360M with LR=7e-4 (confirmed from sweep)
+- 1.7B needs A100 80GB (OOM on RTX 5090)
 
-### Step 4: Educated guess for larger model
-Scale from 135M findings using standard heuristics:
-- LR: scale by ~1/sqrt(N_big/N_small) from 135M optimal
-- Data: same composition, more samples (Chinchilla-proportional)
-- Batch size: adjust for VRAM
-- Schedule: same converging→flat pattern
-This is an informed guess, not a guaranteed optimum. One shot.
-
-## Go/No-Go Before Full Training
-
-Before spending ~$250+ on full 3-stage training:
+## Go/No-Go Checklist
 
 - [x] Foveated beats coarse-only — confirmed (small but consistent gap)
 - [x] Val loss curves converge at ablation budget — yes
 - [x] No divergence with full unfreeze — stable across all runs
-- [ ] Scaling grid shows clear compute-optimal size — 135M done (1.1923), 360M/1.7B LR sweep running, then full scaling reruns
-- [ ] 135M full 3-stage training succeeds end-to-end — validates pipeline
-- [x] Training infrastructure stable — 13 successful ablation runs
+- [x] 360M LR sweep complete — 7e-4 wins
+- [x] 135M Stage 1 complete — val_loss=1.2358
+- [x] 135M Stage 2 complete — train_loss=0.040
+- [ ] 135M Stage 3 (DPO) complete — in progress
+- [ ] Benchmark eval — pending
+- [x] Training infrastructure stable — 13 ablation runs + 3 full stages
 
 ---
 
