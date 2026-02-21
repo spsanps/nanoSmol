@@ -23,6 +23,8 @@ import time
 import torch
 import yaml
 
+# Needed for CLI invocation: `python release/evaluate.py` sets __file__'s parent as the
+# working dir, but `release.*` imports require the repo root on sys.path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from release.model import FoveatedVLM

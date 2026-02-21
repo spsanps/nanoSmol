@@ -9,7 +9,7 @@ Key optimizations vs v1:
 """
 
 import sys, os, json, tarfile, io, time, re, glob, gc
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "workdir/nanoSmol/fVLM"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 import torch.nn.functional as F
@@ -88,9 +88,14 @@ def load_all_samples_from_shards(shard_pattern):
     return samples
 
 
-def prepare_frames_tensor(pil_frames, device="cuda"):
+def prepare_frames_tensor(pil_frames, device="cuda", replicate_to=8):
+    """Transform PIL frames to tensor. Replicate single-frame images to match training."""
     tensors = [FRAME_TRANSFORM(f) for f in pil_frames]
-    return torch.stack(tensors).unsqueeze(0).to(device, dtype=torch.bfloat16)
+    frames = torch.stack(tensors)  # [T, 3, H, W]
+    # Replicate single images to N frames (matches training with replicate_image_frames=8)
+    if frames.shape[0] == 1 and replicate_to > 1:
+        frames = frames.repeat(replicate_to, 1, 1, 1)  # [N, 3, H, W]
+    return frames.unsqueeze(0).to(device, dtype=torch.bfloat16)
 
 
 # ─── MCQ helpers ─────────────────────────────────────────────────────
@@ -321,51 +326,59 @@ def run_mcq_benchmark(model, tokenizer, name, shard_pattern, modes, device, all_
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", nargs="+", default=None,
+                        help="Run only specified benchmarks (e.g. --only POPE ScienceQA)")
+    parser.add_argument("--output", default="/workspace/benchmark_results.json")
+    parser.add_argument("--merge", action="store_true",
+                        help="Merge with existing results file instead of overwriting")
+    args = parser.parse_args()
+
     device = "cuda"
     ckpt = "/workspace/checkpoints/final/stage3/best.pt"
     modes = ["coarse_only", "coarse_fine", "autoregressive"]
 
     print("=" * 70)
-    print("fVLM-135M BENCHMARK EVALUATION v2 (truly batched)")
+    print("fVLM-135M BENCHMARK EVALUATION v3 (8-frame image replication)")
     print("=" * 70)
 
     print("\nLoading model (bf16)...")
     model = load_model(ckpt, device)
     tokenizer = load_tokenizer()
 
+    # Load existing results if merging
     all_results = {}
-    t_global = time.time()
+    if args.merge and os.path.exists(args.output):
+        with open(args.output) as f:
+            all_results = json.load(f)
+        print(f"  Loaded existing results from {args.output}")
 
-    # ─── 1. Val 10K — use cached results from v1 run ─────────────
-    print("\nVal 10K results (from previous run):")
-    all_results["val_10k"] = {
-        "coarse_only":    {"avg_loss": 1.8790, "samples": 1000},
-        "coarse_fine":    {"avg_loss": 1.5327, "samples": 1000},
-        "autoregressive": {"avg_loss": 1.5308, "samples": 1000},
-    }
-    for mode in modes:
-        r = all_results["val_10k"][mode]
-        print(f"  {mode}: avg_loss = {r['avg_loss']:.4f} ({r['samples']} samples)")
+    t_global = time.time()
 
     # ─── MCQ benchmarks (load one at a time, free between) ───────
     benchmarks = [
         ("MVBench",   "/workspace/data/eval/benchmarks/mvbench_shards/mvbench_*.tar"),
         ("Video-MME", "/workspace/data/eval/benchmarks/video_mme_shards/video_mme_*.tar"),
-        ("POPE",      "/workspace/data/eval/benchmarks/pope_shards/pope_*.tar"),
         ("ScienceQA", "/workspace/data/eval/benchmarks/scienceqa_shards/scienceqa_*.tar"),
+        # POPE removed: 135M model always predicts same class → exact 50% (random baseline).
+        # Binary Y/N with 2-3 answer tokens is dominated by token prior, not visual grounding.
     ]
+
+    if args.only:
+        only_set = {n.lower() for n in args.only}
+        benchmarks = [(n, p) for n, p in benchmarks if n.lower() in only_set]
 
     for i, (name, pattern) in enumerate(benchmarks):
         print(f"\n{'-' * 70}")
-        print(f"BENCHMARK {i+2}: {name}")
+        print(f"BENCHMARK: {name}")
         print(f"{'-' * 70}")
         run_mcq_benchmark(model, tokenizer, name, pattern, modes, device, all_results)
 
     # ─── Save results ────────────────────────────────────────────
-    output_path = "/workspace/benchmark_results.json"
-    with open(output_path, "w") as f:
+    with open(args.output, "w") as f:
         json.dump(all_results, f, indent=2)
-    print(f"\nResults saved: {output_path}")
+    print(f"\nResults saved: {args.output}")
 
     # ─── Summary ─────────────────────────────────────────────────
     total_time = time.time() - t_global
@@ -377,7 +390,9 @@ def main():
     for bench_name, bench_data in all_results.items():
         vals = []
         for mode in modes:
-            if "accuracy" in bench_data[mode]:
+            if mode not in bench_data:
+                vals.append("—")
+            elif "accuracy" in bench_data[mode]:
                 vals.append(f"{bench_data[mode]['accuracy']:.1f}%")
             else:
                 vals.append(f"{bench_data[mode]['avg_loss']:.4f}")

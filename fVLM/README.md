@@ -1,57 +1,123 @@
-# Foveated Vision-Language Model
+# fVLM: Foveated Vision-Language Model
 
-A novel VLM architecture that processes video frame-by-frame using foveated attention, where the LLM controls WHERE to look in each frame.
+A VLM that compresses each video frame into **1 visual token** via query-guided foveated attention on DINOv2 features. The LLM learns *where to look* by generating the query for the next frame.
 
-## Documentation
+## Models
 
-- `core_docs/foveated_vlm_proposal.md` - Architecture specification
-- `core_docs/foveated_vlm_execution_guide.md` - Implementation guide
-- `claude.md` - Development guide for AI assistant
+| Model | Params | LLM | HuggingFace |
+|-------|--------|-----|-------------|
+| fVLM-135M | 157.6M | SmolLM2-135M-Instruct | [sanps/fVLM-135M](https://huggingface.co/sanps/fVLM-135M) |
+| fVLM-1.7B | ~1.73B | SmolLM2-1.7B-Instruct | *training* |
 
 ## Quick Start
 
+```python
+import torch
+from torchvision import transforms
+from release.model import FoveatedVLM
+
+model = FoveatedVLM(
+    llm_name="HuggingFaceTB/SmolLM2-135M-Instruct",
+    dino_name="facebook/dinov2-small",
+    query_dim=384, visual_scale=0.14, deep_query=True,
+)
+```
+
+### Image Input (Important)
+
+**Images must be replicated to 8 frames** to match the training distribution. The model was trained with `replicate_image_frames: 8` in Stages 2-3. Passing a single frame for an image will produce degraded results.
+
+```python
+from PIL import Image
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+img = Image.open("photo.jpg").convert("RGB")
+frame = transform(img)                              # [3, 224, 224]
+frames = frame.unsqueeze(0).repeat(8, 1, 1, 1)      # [8, 3, 224, 224]
+frames = frames.unsqueeze(0).to("cuda", dtype=torch.bfloat16)  # [1, 8, 3, H, W]
+```
+
+### Video Input
+
+Sample up to 64 frames uniformly. No replication needed.
+
+```python
+frames = torch.stack([transform(f) for f in video_frames])  # [T, 3, 224, 224]
+frames = frames.unsqueeze(0).to("cuda", dtype=torch.bfloat16)
+```
+
+## Architecture
+
+| Component | Details |
+|-----------|---------|
+| Vision Encoder | DINOv2-small (22M) |
+| Attention | Deep query-guided cross-attention (12 layers) |
+| Visual Tokens | 1 per frame (query-compressed) |
+| Language Model | SmolLM2-135M-Instruct or 1.7B-Instruct |
+| Query Dimension | 384 |
+
+Each frame is encoded by DINOv2, then a learned query propagates through all 12 DINO layers via cross-attention to produce a single foveated token. The LLM generates the next query from its hidden state, creating a feedback loop.
+
+## Training Pipeline
+
+3-stage pipeline (same for 135M and 1.7B):
+
+| Stage | Data | Loss | LR |
+|-------|------|------|----|
+| 1. Visual Alignment | OpenVid-1M + WebVid + SmolTalk | All-text CE | Converging schedule |
+| 2. Vision-Language SFT | Cauldron + video datasets + SmolTalk | Answer-only CE | Flat + cosine decay |
+| 3. DPO | RLAIF-V (83K pairs) | DPO (beta=0.1) | 1e-6 |
+
 ```bash
-# 1. Setup environment
-conda activate fVLM
-pip install -r requirements.txt
-
-# 2. Download models and data
-bash scripts/download_data.sh
-
-# 3. Precompute VAE latents
-python scripts/precompute_latents.py
-
-# 4. Train
-python scripts/train_phase1.py --config configs/phase1.yaml
-
-# 5. Monitor
-tensorboard --logdir outputs/logs
+# Train
+python release/train.py --config release/configs/final/stage1_135M.yaml
 ```
 
 ## Project Structure
 
 ```
-fVLM/
-├── core_docs/          # Architecture & execution docs
-├── configs/            # Training configurations
-├── data/              # Videos and preprocessed latents
-├── src/               # Source code
-│   ├── model/         # Model components
-│   ├── data/          # Data pipeline
-│   └── training/      # Training utilities
-├── scripts/           # Executable scripts
-├── notebooks/         # Analysis notebooks
-└── outputs/           # Checkpoints, logs, visualizations
+release/                    # Canonical codebase
+  model/                    # FoveatedVLM, FoveatedEncoder, MultiTokenVLM
+  data/                     # WebDataset loaders, collation, dynamic batching
+  eval/                     # NLG metrics (CIDEr, BLEU, METEOR)
+  utils/                    # Distributed, checkpoint, LR schedule, logging
+  configs/final/            # Production configs (135M + 1.7B, all 3 stages)
+  scripts/                  # Data download, preprocessing, analysis
+  train.py                  # Training entry point
+  evaluate.py               # Evaluation entry point
+
+scripts/                    # Benchmarking and profiling
+  run_benchmarks.py         # MCQ benchmark evaluation (MVBench, Video-MME, ScienceQA, POPE)
+
+docs/                       # Documentation
+  hf_model_card_README.md   # HuggingFace model card
 ```
 
-## Hardware Requirements
+## Benchmark Results (fVLM-135M)
 
-- GPU: NVIDIA RTX 4090 (24GB VRAM)
-- Precision: bfloat16
-- Batch size: 2 (with gradient accumulation)
+### Video
 
-## Success Metric
+| Benchmark | fVLM-135M | SmolVLM2-256M | SmolVLM2-2.2B |
+|-----------|:---------:|:------------:|:------------:|
+| MVBench (3800 MCQ) | 28.0% | 32.7% | 46.3% |
+| Video-MME (2700 MCQ) | 29.5% | 33.7% | 52.1% |
 
-**Core hypothesis**: Dynamic foveated attention (Pass 2) outperforms static attention (Pass 1)
+### Image
 
-Validation: `loss_fine < loss_coarse` consistently during training
+| Benchmark | fVLM-135M | SmolVLM2-256M | SmolVLM2-2.2B |
+|-----------|:---------:|:------------:|:------------:|
+| ScienceQA (2017 MCQ) | 36.0% | 73.8% | 89.6% |
+
+## Hardware
+
+- **135M training**: A100 80GB, bf16, ~27 samp/s (optimized)
+- **1.7B training**: A100 80GB, bf16, gradient checkpointing + torch.compile
+
+## License
+
+Apache 2.0

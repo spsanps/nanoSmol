@@ -44,38 +44,31 @@ docs/
 
 **Ignore**: `src/`, `scripts/`, `research/`, `core_docs/` — all legacy, superseded by `release/`.
 
-## Current State (2026-02-15)
+## Current State (2026-02-21)
 
-**Phase: Ready for GPU Phase 1a ablation runs.**
+**Phase: 135M training complete. 1.7B configs ready. Throughput optimized to ~27 samp/s.**
 
-All code and data are ready. Next step is running 12 ablation experiments on 2xA100-80GB.
+### Completed
+- 135M 3-stage training (Stage 1 visual alignment → Stage 2 SFT → Stage 3 DPO)
+- Benchmarks: MVBench 28.0%, Video-MME 29.5%, ScienceQA 36.4%, POPE 50.0%
+- Model uploaded to HuggingFace: `sanps/fVLM-135M`
+- Training throughput optimized 2.25x (12 → 27 samp/s) via:
+  - Coarse pass text skip (visual positions never see text in causal attention)
+  - Dynamic batching with token budget (max_total_frames=512)
+  - torch.compile + use_reentrant=False gradient checkpointing
+  - Text-only lm_head (skip visual positions in logits)
+- 1.7B configs created: `release/configs/final/stage{1,2,3}_1.7B.yaml`
 
 ### What to do next
+1. **Profile optimizations**: Run `scripts/profile_optimizations.py` to benchmark all Codex suggestions
+2. Start 1.7B training: `python release/train.py --config release/configs/final/stage1_1.7B.yaml`
+3. Continue iterative throughput optimization (target: 95%+ GPU util)
 
-1. Read `docs/runpod/GPU_HANDOFF.md` for the complete run guide
-2. Read `docs/GPU_PHASE1_PLAN.md` for the full plan with decision framework
-3. Run ablations: `torchrun --nproc_per_node=2 release/train.py --config release/configs/ablations/<CONFIG>.yaml`
-
-### Phase 1a: 12 Ablation Runs
-
-| Run | Config | What |
-|-----|--------|------|
-| F1 | `F1_freeze_both.yaml` | Connector only (both backbones frozen) |
-| F2 | `F2_freeze_llm.yaml` | Connector + DINO (LLM frozen) |
-| F3/LR1 | `LR1.yaml` | Full unfreeze, 10:1 LR ratio (**BASELINE**) |
-| LR2 | `LR2.yaml` | Full unfreeze, 100:1 |
-| LR3 | `LR3.yaml` | Full unfreeze, 3:1 |
-| LR4 | `LR4.yaml` | Full unfreeze, 1:1 uniform |
-| A1 | `A1_deep_query_off.yaml` | Shallow query (proves deep query essential) |
-| A6 | `A6_coarse_only.yaml` | No fine pass (proves foveation helps) |
-| B1 | `B1_multi_token.yaml` | 16 tok/frame baseline (efficiency comparison) |
-| A8a | `A8_static_1frame.yaml` | Image with 1 frame (control) |
-| A8b | `A8_static_16frames.yaml` | Image replicated to 16 frames |
-| D1 | `D1_video_heavy.yaml` | 55% video / 30% image / 15% text |
-
-**Execution order**: F1+F2+LR1 first → analyze → LR2+LR3+LR4+A1 → A6+B1+A8a+A8b+D1
-
-**Ignore these legacy configs**: `baseline.yaml`, `A2_*`, `A3_*`, `A4_*`, `A5_*`, `A8_static_8frames.yaml`, `T1_*`, `T2_*`, `T3_*`
+### Optimization Roadmap (see `docs/OPTIMIZATION_ROADMAP.md` for full details)
+- **Implemented**: Liger Kernel FLCE (`use_fused_ce: true`), no grad ckpt, increased batch/frames
+- **To profile**: max-autotune compile, fullgraph encoder, shape padding
+- **Deferred**: CUDA stream overlap, sequence packing (high effort)
+- **Profiling script**: `scripts/profile_optimizations.py` (9 test configs)
 
 ## Data (all at /workspace/data/)
 
@@ -98,6 +91,26 @@ All code and data are ready. Next step is running 12 ablation experiments on 2xA
 - 14% SmolTalk text retention in ALL stages
 - deep_query=True, query_dim=384, bias=False, std=1.0 init
 - No reconstruction loss, no VAE, no DoRA
+
+## Image Usage (IMPORTANT)
+
+**Images must be replicated to 8 frames** before passing to the model.
+
+The model treats all inputs as video. During training (Stage 2 + 3), images are replicated to 8 identical frames via `replicate_image_frames: 8` in the config. At inference/evaluation time, the same replication must be applied:
+
+```python
+# Single image → 8 frames
+frame_tensor = transform(pil_image)                    # [3, 224, 224]
+frames = frame_tensor.unsqueeze(0).repeat(8, 1, 1, 1)  # [8, 3, 224, 224]
+```
+
+Failing to replicate produces degraded results because the model learned visual representations assuming 8 frames per image. This applies to both evaluation and inference.
+
+Documented in:
+- `release/model/foveated_vlm.py` — forward() docstring
+- `docs/hf_model_card_README.md` — Usage section
+- `README.md` — Image Input section
+- `scripts/run_benchmarks.py` — `prepare_frames_tensor(replicate_to=8)`
 
 ## Environment
 
