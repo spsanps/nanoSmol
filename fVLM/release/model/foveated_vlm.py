@@ -403,37 +403,26 @@ class FoveatedVLM(nn.Module):
         out_fine = self.llm.model(inputs_embeds=seq_fine)
         h_fine = out_fine.last_hidden_state                        # [B,T+S,ld]
 
-        # Get logits over the FULL sequence (visual + text positions)
-        logits_full = self.llm.lm_head(h_fine)                    # [B,T+S,V]
+        # Compute logits on TEXT positions only (visual positions are masked
+        # in loss anyway). Saves lm_head compute on T positions and avoids
+        # allocating the [B,T,V] portion of the logits tensor (~1.2 GB).
+        h_text = h_fine[:, T:, :]                                  # [B,S,ld]
+        logits_text = self.llm.lm_head(h_text)                    # [B,S,V]
 
-        # ---- Loss on text portion only ----
-        pad_id = self._get_pad_token_id()
-        visual_pad = torch.full(
-            (B, T), pad_id, dtype=input_ids.dtype, device=input_ids.device,
-        )
-        full_labels = torch.cat([visual_pad, input_ids], dim=1)    # [B, T+S]
+        # ---- Loss on text portion ----
+        if loss_mask is None:
+            loss_mask = attention_mask.float()
 
-        # Build full loss mask: 0 for visual positions, then the provided loss_mask
-        if loss_mask is not None:
-            visual_no_loss = torch.zeros(
-                B, T, dtype=loss_mask.dtype, device=loss_mask.device,
-            )
-            full_loss_mask = torch.cat([visual_no_loss, loss_mask], dim=1)  # [B,T+S]
-        else:
-            visual_no_loss = torch.zeros(B, T, dtype=attention_mask.dtype, device=attention_mask.device)
-            text_loss_mask = attention_mask
-            full_loss_mask = torch.cat([visual_no_loss, text_loss_mask], dim=1)
-
-        fine_loss = self._ce_loss(logits_full, full_labels, full_loss_mask)
+        fine_loss = self._ce_loss(logits_text, input_ids, loss_mask)
 
         # ---- Optional auxiliary coarse loss ----
         coarse_loss = torch.tensor(0.0, device=frames.device)
         if self.lambda_coarse > 0:
-            # For coarse loss, need full coarse forward with text (expensive path)
             seq_coarse_full = torch.cat([z_coarse_llm, text_embeds], dim=1)
             out_coarse_full = self.llm.model(inputs_embeds=seq_coarse_full)
-            logits_coarse = self.llm.lm_head(out_coarse_full.last_hidden_state)
-            coarse_loss = self._ce_loss(logits_coarse, full_labels, full_loss_mask)
+            h_coarse_text = out_coarse_full.last_hidden_state[:, T:, :]
+            logits_coarse = self.llm.lm_head(h_coarse_text)
+            coarse_loss = self._ce_loss(logits_coarse, input_ids, loss_mask)
 
         # ---- Combined loss ----
         loss = fine_loss + self.lambda_coarse * coarse_loss
@@ -442,7 +431,7 @@ class FoveatedVLM(nn.Module):
             "loss": loss,
             "fine_loss": fine_loss,
             "coarse_loss": coarse_loss,
-            "logits": logits_full,
+            "logits": logits_text,  # [B,S,V] text positions only
         }
 
     # ------------------------------------------------------------------
@@ -511,31 +500,31 @@ class FoveatedVLM(nn.Module):
         z_fine = self._query_all_frames_batched(shifted_queries, kv_cache, B, T, mask_flat, patch_features)
         z_fine_llm = self._project_visual(z_fine)                        # [B, T, ld]
 
-        # ---- Forward on CHOSEN ----
+        # ---- Forward on CHOSEN (lm_head on text positions only) ----
         text_embeds_chosen = self._embed_text(chosen_input_ids)          # [B, S_c, ld]
         seq_chosen = torch.cat([z_fine_llm, text_embeds_chosen], dim=1)  # [B, T+S_c, ld]
         out_chosen = self.llm.model(inputs_embeds=seq_chosen)
-        chosen_logits = self.llm.lm_head(out_chosen.last_hidden_state)  # [B, T+S_c, V]
+        chosen_logits = self.llm.lm_head(out_chosen.last_hidden_state[:, T:, :])  # [B, S_c, V]
 
-        # ---- Forward on REJECTED ----
+        # ---- Forward on REJECTED (lm_head on text positions only) ----
         text_embeds_rejected = self._embed_text(rejected_input_ids)      # [B, S_r, ld]
         seq_rejected = torch.cat([z_fine_llm, text_embeds_rejected], dim=1)
         out_rejected = self.llm.model(inputs_embeds=seq_rejected)
-        rejected_logits = self.llm.lm_head(out_rejected.last_hidden_state)
+        rejected_logits = self.llm.lm_head(out_rejected.last_hidden_state[:, T:, :])  # [B, S_r, V]
 
         # ---- Compute per-token log-probs ----
         chosen_logps = self._sequence_logprobs(
-            chosen_logits, chosen_input_ids, chosen_loss_mask, T,
+            chosen_logits, chosen_input_ids, chosen_loss_mask,
         )
         rejected_logps = self._sequence_logprobs(
-            rejected_logits, rejected_input_ids, rejected_loss_mask, T,
+            rejected_logits, rejected_input_ids, rejected_loss_mask,
         )
 
         return {
             "chosen_logps": chosen_logps,       # [B]
             "rejected_logps": rejected_logps,   # [B]
-            "chosen_logits": chosen_logits,     # [B, T+S_c, V]
-            "rejected_logits": rejected_logits, # [B, T+S_r, V]
+            "chosen_logits": chosen_logits,     # [B, S_c, V]
+            "rejected_logits": rejected_logits, # [B, S_r, V]
         }
 
     def _sequence_logprobs(
@@ -543,23 +532,20 @@ class FoveatedVLM(nn.Module):
         logits: torch.Tensor,
         input_ids: torch.Tensor,
         loss_mask: torch.Tensor,
-        T: int,
     ) -> torch.Tensor:
         """
         Compute per-sample sum of log-probabilities on answer tokens.
 
-        logits    : [B, T+S, V]  full sequence logits (visual + text)
-        input_ids : [B, S]       text token ids
-        loss_mask : [B, S]       1.0 for answer tokens, 0.0 otherwise
-        T         : int          number of visual token positions
+        logits    : [B, S, V]  text-only logits (visual positions excluded)
+        input_ids : [B, S]     text token ids
+        loss_mask : [B, S]     1.0 for answer tokens, 0.0 otherwise
 
-        Returns   : [B]          sum of log-probs per sample
+        Returns   : [B]        sum of log-probs per sample
         """
         B, S = input_ids.shape
 
-        # Extract text logits and shift for autoregressive prediction
-        text_logits = logits[:, T:, :]                                # [B, S, V]
-        shift_logits = text_logits[:, :-1, :]                         # [B, S-1, V]
+        # Shift for autoregressive prediction
+        shift_logits = logits[:, :-1, :]                              # [B, S-1, V]
         shift_labels = input_ids[:, 1:]                               # [B, S-1]
         shift_mask = loss_mask[:, 1:]                                 # [B, S-1]
 
