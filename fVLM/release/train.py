@@ -568,13 +568,16 @@ def train(cfg: dict, args):
 
     # ---- torch.compile ----
     if cfg["training"].get("compile", False) and hasattr(torch, "compile"):
+        compile_mode = cfg["training"].get("compile_mode", "reduce-overhead")
         if is_main_process():
-            print("  Compiling model with torch.compile (reduce-overhead) ...")
+            print(f"  Compiling model with torch.compile ({compile_mode}) ...")
         # Compile individual components to avoid graph breaks at boundaries
-        raw_model.encoder = torch.compile(raw_model.encoder, dynamic=True)
-        raw_model.llm = torch.compile(raw_model.llm, dynamic=True)
-        raw_model.dino_to_llm = torch.compile(raw_model.dino_to_llm)
-        raw_model.llm_to_query = torch.compile(raw_model.llm_to_query)
+        # DINO encoder: fixed 224x224 inputs → dynamic=False for better optimization
+        raw_model.encoder = torch.compile(raw_model.encoder, mode=compile_mode, dynamic=False)
+        # LLM: variable sequence length → dynamic=True
+        raw_model.llm = torch.compile(raw_model.llm, mode=compile_mode, dynamic=True)
+        raw_model.dino_to_llm = torch.compile(raw_model.dino_to_llm, mode=compile_mode)
+        raw_model.llm_to_query = torch.compile(raw_model.llm_to_query, mode=compile_mode)
 
     # ---- Val loader ----
     val_loader = build_val_loader(cfg)

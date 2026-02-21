@@ -10,7 +10,7 @@
 # Init: Best Stage 1 checkpoint
 #
 # LR scaling: 135M used 3e-5 -> 1.7B: 3e-5 * 0.28 ~ 1e-5
-# Memory: A100 80GB — gradient_checkpointing required
+# Memory: A100 80GB — fits without gradient checkpointing
 # =============================================================================
 
 stage: 2
@@ -22,7 +22,7 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   init_from: /workspace/checkpoints/final_1.7B/stage1/best.pt
 
 data:
@@ -47,8 +47,8 @@ data:
 
 training:
   total_samples: 1_000_000
-  batch_size: 8
-  grad_accum: 4
+  batch_size: 16
+  grad_accum: 2
   lr_connector: 1.0e-5
   lr_dino: 1.0e-5
   lr_llm: 1.0e-5

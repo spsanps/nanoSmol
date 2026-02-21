@@ -9,7 +9,8 @@
 # Text retention: Proper chat format (not wrapped in WebVid prompt)
 #
 # LR scaling: 1/sqrt(1711/135) ~ 0.28x from 135M (mu-parametrization inspired)
-# Memory: A100 80GB — gradient_checkpointing required for 1.7B
+# Memory: A100 80GB — 1.7B fits comfortably without gradient checkpointing
+# ~20.5GB fixed (weights+optim+grads) → 59.5GB free for activations
 # =============================================================================
 
 stage: 1
@@ -21,7 +22,7 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 
 data:
   train_shards:
@@ -36,8 +37,8 @@ data:
 
 training:
   total_samples: 1_000_000
-  batch_size: 8
-  grad_accum: 4
+  batch_size: 16
+  grad_accum: 2
   lr_connector: 3.0e-4
   lr_dino: 3.0e-6
   lr_llm: 3.0e-6

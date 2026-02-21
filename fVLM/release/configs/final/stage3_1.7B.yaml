@@ -9,9 +9,8 @@
 # Reference: Same checkpoint (frozen copy)
 #
 # LR scaling: 135M used 1e-6 -> 1.7B: 1e-6 * 0.28 ~ 5e-7 (rounded up)
-# Memory: DPO = 2x forward (chosen+rejected) + reference model copy
-#   A100 80GB — batch_size=2 with grad_accum=16 (eff_batch=32)
-#   gradient_checkpointing required
+# Memory: DPO = 2x forward (chosen+rejected) + reference model copy (~24GB)
+#   A100 80GB — batch_size=4 with grad_accum=8 (eff_batch=32), no grad ckpt needed
 # =============================================================================
 
 stage: 3
@@ -23,7 +22,7 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   init_from: /workspace/checkpoints/final_1.7B/stage2/best.pt
 
 data:
@@ -37,8 +36,8 @@ data:
 
 training:
   total_samples: 83_000
-  batch_size: 2
-  grad_accum: 16
+  batch_size: 4
+  grad_accum: 8
   lr_connector: 5.0e-7
   lr_dino: 5.0e-7
   lr_llm: 5.0e-7
