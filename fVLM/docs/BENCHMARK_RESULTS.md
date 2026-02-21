@@ -39,12 +39,13 @@
 
 ## Comparison with SmolVLM2
 
-| Benchmark | fVLM-135M (coarse_fine) | SmolVLM2-256M | SmolVLM2-500M |
-|-----------|------------------------|---------------|---------------|
-| MVBench | 28.0% | TBD | TBD |
-| Video-MME | TBD | TBD | TBD |
-| POPE | TBD | TBD | TBD |
-| ScienceQA | TBD | TBD | TBD |
+| Benchmark | fVLM-135M (coarse_fine) | SmolVLM2-256M | SmolVLM2-500M | SmolVLM2-2.2B |
+|-----------|------------------------|---------------|---------------|---------------|
+| MVBench | 28.0% | 32.7% | 40.0% | 47.0% |
+| Video-MME | running... | 33.7% | 42.5% | 52.2% |
+| MLVU | — | 40.6% | — | — |
+| POPE | pending | — | — | — |
+| ScienceQA | pending | — | — | — |
 
 ## Notes
 - fVLM-135M is 157.6M total (135M LLM + 22M DINO + connector)

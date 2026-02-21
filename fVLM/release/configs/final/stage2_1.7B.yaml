@@ -10,7 +10,8 @@
 # Init: Best Stage 1 checkpoint
 #
 # LR scaling: 135M used 3e-5 -> 1.7B: 3e-5 * 0.28 ~ 1e-5
-# Memory: A100 80GB — fits without gradient checkpointing
+# Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed, ~59GB free
+# Stage 1 verified: batch_size=16 → 57GB, 100% GPU util, 8 samp/s, 0 OOMs
 # =============================================================================
 
 stage: 2

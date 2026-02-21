@@ -9,8 +9,9 @@
 # Reference: Same checkpoint (frozen copy)
 #
 # LR scaling: 135M used 1e-6 -> 1.7B: 1e-6 * 0.28 ~ 5e-7 (rounded up)
-# Memory: DPO = 2x forward (chosen+rejected) + reference model copy (~24GB)
+# Memory: DPO = 3 LLM fwd (policy) + ref model (~24.3GB fixed with bf16)
 #   A100 80GB — batch_size=4 with grad_accum=8 (eff_batch=32), no grad ckpt needed
+# Stage 1 verified: bf16 weights → 100% GPU util at batch_size=16 SFT
 # =============================================================================
 
 stage: 3

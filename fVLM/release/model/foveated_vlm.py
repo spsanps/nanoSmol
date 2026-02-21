@@ -64,7 +64,7 @@ class FoveatedVLM(nn.Module):
 
         # ---- Language model ----
         self.llm = AutoModelForCausalLM.from_pretrained(
-            llm_name, attn_implementation="sdpa", torch_dtype=torch.float32,
+            llm_name, attn_implementation="sdpa", torch_dtype=torch.bfloat16,
         )
         self.llm.config.use_cache = False  # training default; overridden per-method
         llm_dim = self.llm.config.hidden_size

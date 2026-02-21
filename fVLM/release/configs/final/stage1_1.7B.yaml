@@ -9,8 +9,9 @@
 # Text retention: Proper chat format (not wrapped in WebVid prompt)
 #
 # LR scaling: 1/sqrt(1711/135) ~ 0.28x from 135M (mu-parametrization inspired)
-# Memory: A100 80GB — 1.7B fits comfortably without gradient checkpointing
-# ~20.5GB fixed (weights+optim+grads) → 59.5GB free for activations
+# Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed, ~59GB free
+# Verified: batch_size=16 → 57GB total, 100% GPU util, 8 samp/s, 0 OOMs
+# batch_size=24 causes ~15% OOM rate on long-video batches → 16 is optimal
 # =============================================================================
 
 stage: 1
