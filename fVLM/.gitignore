@@ -60,3 +60,7 @@ docs/external_refs/
 
 # PDF outputs (redundant with PNGs)
 *.pdf
+
+# Session continuation logs (auto-generated)
+*-this-session-*.txt
+*-local-command-*.txt
