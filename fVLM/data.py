@@ -761,7 +761,7 @@ def make_dataloader(
     Convenience wrapper: creates the webdataset pipeline and wraps it in a
     standard PyTorch DataLoader with the given collate function.
 
-    If collate_fn is None, use release.data.collate.collate_foveated.
+    If collate_fn is None, use collate.collate_foveated.
     """
     if collate_fn is None:
         from collate import collate_foveated

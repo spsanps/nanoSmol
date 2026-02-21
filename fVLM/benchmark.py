@@ -9,7 +9,6 @@ Key optimizations vs v1:
 """
 
 import sys, os, json, tarfile, io, time, re, glob, gc
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 import torch.nn.functional as F

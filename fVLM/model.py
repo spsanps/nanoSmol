@@ -1,5 +1,5 @@
 """
-Foveated Vision-Language Model (release implementation).
+Foveated Vision-Language Model.
 
 Architecture: DINOv2 encoder + foveated cross-attention + SmolLM2 LLM.
 Each video frame is compressed to ONE visual token via query-guided attention.

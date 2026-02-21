@@ -4,13 +4,13 @@ Unified training script for foveated VLM (all stages).
 
 Usage:
     # Single GPU
-    python release/train.py --config release/configs/stage1_webvid.yaml
+    python train.py --config configs/stage1_135M.yaml
 
     # Multi-GPU (2xA100)
-    torchrun --nproc_per_node=2 release/train.py --config release/configs/stage1_webvid.yaml
+    torchrun --nproc_per_node=2 train.py --config configs/stage1_135M.yaml
 
     # Dry run (verify config, dataloaders, shapes)
-    python release/train.py --config release/configs/stage1_webvid.yaml --dry-run
+    python train.py --config configs/stage1_135M.yaml --dry-run
 """
 
 import argparse
@@ -34,7 +34,7 @@ torch.backends.cuda.matmul.allow_tf32 = True  # redundant with set_float32_matmu
 # nanochat: expandable segments for GPU memory allocator
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# Ensure release/ is importable when run from repo root.
+# Local imports (flat layout — all modules at repo root).
 
 from model import FoveatedVLM
 from data import make_dataloader, make_dynamic_dataloader, create_dpo_webdataset
@@ -584,6 +584,13 @@ def train(cfg: dict, args):
     )
 
     # ---- torch.compile ----
+    # WARNING: torch.compile + gradient_checkpointing = NaN loss (known incompatibility).
+    if cfg["training"].get("compile", False) and cfg["model"].get("gradient_checkpointing", False):
+        if is_main_process():
+            print("  WARNING: compile=true + gradient_checkpointing=true produces NaN loss!")
+            print("  Disabling torch.compile. Set compile=false in config to suppress this warning.")
+        cfg["training"]["compile"] = False
+
     if cfg["training"].get("compile", False) and hasattr(torch, "compile"):
         compile_mode = cfg["training"].get("compile_mode", "reduce-overhead")
         if is_main_process():

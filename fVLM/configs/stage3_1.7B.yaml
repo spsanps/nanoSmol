@@ -47,8 +47,8 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: true
-  compile_mode: max-autotune
+  compile: false                   # compile + grad_ckpt = NaN loss (known incompatibility)
+  # compile_mode: max-autotune    # disabled because compile=false
   seed: 42
 
 loss:
