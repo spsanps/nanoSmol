@@ -682,6 +682,61 @@ def create_dpo_webdataset(
     return dataset
 
 
+def make_dynamic_dataloader(
+    shard_pattern: str,
+    max_total_frames: int = 512,
+    max_batch_size: int = 64,
+    max_frames: int = 64,
+    min_frames: int = 0,
+    shuffle: bool = True,
+    seed: int = 42,
+    epoch: int = 0,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    prefetch_factor: int = 4,
+    tokenizer=None,
+    stage: int = 1,
+    replicate_image_frames: int = 1,
+) -> torch.utils.data.DataLoader:
+    """
+    Dynamic-batch dataloader: batch size varies per batch based on total
+    frame count.  Short-video batches get more samples; long-video batches
+    get fewer.  Total frames per batch is capped at max_total_frames.
+
+    This keeps GPU work roughly constant across batches and eliminates the
+    pathological case where one T=64 sample forces the entire batch to pad
+    to 64 frames.
+    """
+    from release.data.collate import token_budget_batcher
+
+    dataset = create_webdataset(
+        shard_pattern=shard_pattern,
+        tokenizer=tokenizer,
+        stage=stage,
+        max_frames=max_frames,
+        min_frames=min_frames,
+        shuffle=shuffle,
+        seed=seed,
+        epoch=epoch,
+        num_workers=num_workers,
+        replicate_image_frames=replicate_image_frames,
+    )
+
+    # The batcher forms variable-size batches and collates them internally
+    dataset = dataset.compose(token_budget_batcher(max_total_frames, max_batch_size))
+
+    # batch_size=None: each dataset item is already a collated batch dict
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=None,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
+    )
+    return loader
+
+
 def make_dataloader(
     shard_pattern: str,
     batch_size: int,

@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from release.model import FoveatedVLM
 from release.model.multi_token_vlm import MultiTokenVLM
-from release.data.webdataset_loader import make_dataloader, create_dpo_webdataset
+from release.data.webdataset_loader import make_dataloader, make_dynamic_dataloader, create_dpo_webdataset
 from release.data.collate import collate_dpo
 from release.data.text_interleave import InterleavedDataLoader
 from release.utils.distributed import (
@@ -150,20 +150,39 @@ def build_train_loader(cfg: dict, epoch: int = 0):
     stage = cfg.get("stage", 1)
     tokenizer = _get_tokenizer(cfg)
 
-    vision_loader = make_dataloader(
-        shard_pattern=cfg["data"]["train_shards"],
-        batch_size=cfg["training"]["batch_size"],
-        max_frames=cfg["data"].get("max_frames", 64),
-        min_frames=cfg["data"].get("min_frames", 0),
-        shuffle=True,
-        seed=cfg["training"].get("seed", 42),
-        epoch=epoch,
-        num_workers=cfg["data"].get("num_workers", 12),
-        prefetch_factor=cfg["data"].get("prefetch_factor", 8),
-        tokenizer=tokenizer,
-        stage=stage,
-        replicate_image_frames=cfg["data"].get("replicate_image_frames", 1),
-    )
+    use_dynamic = cfg["training"].get("dynamic_batching", False)
+
+    if use_dynamic:
+        vision_loader = make_dynamic_dataloader(
+            shard_pattern=cfg["data"]["train_shards"],
+            max_total_frames=cfg["training"].get("max_total_frames", 512),
+            max_batch_size=cfg["training"].get("max_batch_size", 64),
+            max_frames=cfg["data"].get("max_frames", 64),
+            min_frames=cfg["data"].get("min_frames", 0),
+            shuffle=True,
+            seed=cfg["training"].get("seed", 42),
+            epoch=epoch,
+            num_workers=cfg["data"].get("num_workers", 12),
+            prefetch_factor=cfg["data"].get("prefetch_factor", 8),
+            tokenizer=tokenizer,
+            stage=stage,
+            replicate_image_frames=cfg["data"].get("replicate_image_frames", 1),
+        )
+    else:
+        vision_loader = make_dataloader(
+            shard_pattern=cfg["data"]["train_shards"],
+            batch_size=cfg["training"]["batch_size"],
+            max_frames=cfg["data"].get("max_frames", 64),
+            min_frames=cfg["data"].get("min_frames", 0),
+            shuffle=True,
+            seed=cfg["training"].get("seed", 42),
+            epoch=epoch,
+            num_workers=cfg["data"].get("num_workers", 12),
+            prefetch_factor=cfg["data"].get("prefetch_factor", 8),
+            tokenizer=tokenizer,
+            stage=stage,
+            replicate_image_frames=cfg["data"].get("replicate_image_frames", 1),
+        )
 
     text_ratio = cfg["data"].get("text_ratio", 0.0)
     if text_ratio > 0 and cfg["data"].get("text_shards"):
@@ -484,13 +503,18 @@ def train(cfg: dict, args):
     # ---- Gradient checkpointing (nanochat: trade compute for memory) ----
     if cfg["model"].get("gradient_checkpointing", False):
         if hasattr(raw_model, "enable_gradient_checkpointing"):
-            # llm_only=True when compile_encoder is set (DINO can be compiled
-            # only if it doesn't use gradient checkpointing)
             llm_only = cfg["training"].get("compile_encoder", False)
-            raw_model.enable_gradient_checkpointing(llm_only=llm_only)
+            # use_reentrant=False is required for torch.compile compatibility.
+            # The reentrant checkpoint implementation causes NaN with compile.
+            use_compile = cfg["training"].get("compile", False)
+            use_reentrant = not use_compile  # non-reentrant when compiling
+            raw_model.enable_gradient_checkpointing(
+                llm_only=llm_only, use_reentrant=use_reentrant,
+            )
             if is_main_process():
                 mode = "LLM only" if llm_only else "LLM + DINO"
-                print(f"  Gradient checkpointing: {mode}")
+                reentrant_str = "reentrant" if use_reentrant else "non-reentrant (compile-safe)"
+                print(f"  Gradient checkpointing: {mode}, {reentrant_str}")
 
     # ---- Optimizer (differential LR) ----
     param_groups = raw_model.get_param_groups(

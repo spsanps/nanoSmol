@@ -815,7 +815,9 @@ class FoveatedVLM(nn.Module):
     # Utility methods for external callers (train.py, eval.py)
     # ------------------------------------------------------------------
 
-    def enable_gradient_checkpointing(self, llm_only: bool = False) -> None:
+    def enable_gradient_checkpointing(
+        self, llm_only: bool = False, use_reentrant: bool = True,
+    ) -> None:
         """Turn on activation checkpointing for LLM (and optionally DINO).
 
         Args:
@@ -823,10 +825,19 @@ class FoveatedVLM(nn.Module):
                       un-checkpointed so it can be safely torch.compiled.
                       DINO is small (22M params) so checkpointing saves
                       little memory there.
+            use_reentrant: If False, use non-reentrant checkpointing which
+                          is compatible with torch.compile (the reentrant
+                          version causes NaN with compile). Default True
+                          for backward compat; set False when using compile.
         """
-        self.llm.gradient_checkpointing_enable()
+        ckpt_kwargs = {"use_reentrant": use_reentrant}
+        self.llm.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs=ckpt_kwargs
+        )
         if not llm_only and hasattr(self.encoder.dino, 'gradient_checkpointing_enable'):
-            self.encoder.dino.gradient_checkpointing_enable()
+            self.encoder.dino.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs=ckpt_kwargs
+            )
 
     def get_param_groups(
         self,

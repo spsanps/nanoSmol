@@ -1,11 +1,17 @@
 """
-Custom collate function for variable-length foveated VLM batches.
+Custom collate functions for variable-length foveated VLM batches.
 
 Handles two axes of variation:
   1. Frame count  -- videos have 1-64 frames depending on duration.
   2. Text length  -- tokenized sequences vary per sample.
 
 Produces padded tensors + boolean masks so the model can ignore padding.
+
+Includes a token-budget batcher that forms variable-size batches by
+capping total frames per batch (rather than a fixed batch size).
+This keeps GPU work roughly constant across batches:
+  - Short videos (T=1): bs up to max_batch_size
+  - Long videos (T=64): bs=8
 """
 
 import torch
@@ -155,3 +161,50 @@ def collate_dpo(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         "rejected_loss_mask": rejected_loss_mask,      # [B, S_r_max]
         "num_frames": num_frames,                      # [B]
     }
+
+
+# --------------------------------------------------------------------------- #
+# Token-budget batcher (dynamic batch sizing by total frame count)
+# --------------------------------------------------------------------------- #
+
+def token_budget_batcher(max_total_frames: int = 512, max_batch_size: int = 64):
+    """
+    WebDataset compositor that forms variable-size batches by capping total
+    frames per batch.  Keeps GPU work roughly constant across batches:
+      - Short videos (T=1): bs up to max_batch_size
+      - Long videos (T=64): bs = max_total_frames // 64 = 8
+
+    Usage in a WebDataset pipeline::
+
+        dataset = dataset.compose(token_budget_batcher(512, 64))
+
+    Each yielded item is a collated batch dict (same format as
+    collate_foveated output), ready for the training loop.
+    """
+    def _batcher(src):
+        batch = []
+        total_frames = 0
+
+        for sample in src:
+            t = sample["frames"].shape[0]
+
+            # If adding this sample would exceed budget and we have samples,
+            # yield the current batch first
+            if total_frames + t > max_total_frames and batch:
+                yield collate_foveated(batch)
+                batch = []
+                total_frames = 0
+
+            batch.append(sample)
+            total_frames += t
+
+            # Also cap absolute batch size
+            if len(batch) >= max_batch_size:
+                yield collate_foveated(batch)
+                batch = []
+                total_frames = 0
+
+        if batch:
+            yield collate_foveated(batch)
+
+    return _batcher

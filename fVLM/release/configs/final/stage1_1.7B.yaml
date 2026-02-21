@@ -10,8 +10,9 @@
 #
 # LR scaling: 1/sqrt(1711/135) ~ 0.28x from 135M (mu-parametrization inspired)
 # Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed
-# Verified: bs=32, grad_ckpt=true, compile=false → 12 samp/s, 32GB peak, 100% GPU util
-# torch.compile + grad_ckpt = NaN; compile + no ckpt OOMs on long videos
+# Optimized: coarse pass skip text (31% gain), dynamic batching (variable bs),
+# torch.compile with use_reentrant=False (fixes compile+grad_ckpt NaN)
+# Throughput: ~15.7 samp/s fixed bs=32, target ~25+ samp/s with all opts
 # =============================================================================
 
 stage: 1
@@ -40,6 +41,9 @@ training:
   total_samples: 1_000_000
   batch_size: 32
   grad_accum: 1
+  dynamic_batching: true
+  max_total_frames: 512
+  max_batch_size: 64
   lr_connector: 3.0e-4
   lr_dino: 3.0e-6
   lr_llm: 3.0e-6
@@ -49,7 +53,8 @@ training:
   max_grad_norm: 1.0
   schedule: converging
   dtype: bfloat16
-  compile: false
+  compile: true
+  compile_mode: default
   seed: 42
 
 loss:
