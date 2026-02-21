@@ -160,7 +160,7 @@ def decode_sample(sample: dict, max_frames: int = 64,
 
     # On-the-fly tokenization if pre-tokenized data is missing
     if token_ids is None or loss_mask is None:
-        from release.scripts.precompute import (
+        from tokenization import (
             tokenize_stage1, tokenize_sft, SOURCE_PROMPTS, DEFAULT_VISUAL_PROMPT,
         )
 
@@ -346,7 +346,7 @@ def decode_dpo_sample(sample: dict, max_frames: int = 64,
     # ------------------------------------------------------------------
     # 2. Tokenize chosen and rejected with answer-only loss masks
     # ------------------------------------------------------------------
-    from release.scripts.precompute import tokenize_sft, SOURCE_PROMPTS, DEFAULT_VISUAL_PROMPT
+    from tokenization import tokenize_sft, SOURCE_PROMPTS, DEFAULT_VISUAL_PROMPT
 
     source = meta.get("source", "")
     effective_user = user_text if user_text else SOURCE_PROMPTS.get(source, DEFAULT_VISUAL_PROMPT)
@@ -707,7 +707,7 @@ def make_dynamic_dataloader(
     pathological case where one T=64 sample forces the entire batch to pad
     to 64 frames.
     """
-    from release.data.collate import token_budget_batcher
+    from collate import token_budget_batcher
 
     dataset = create_webdataset(
         shard_pattern=shard_pattern,
@@ -764,7 +764,7 @@ def make_dataloader(
     If collate_fn is None, use release.data.collate.collate_foveated.
     """
     if collate_fn is None:
-        from release.data.collate import collate_foveated
+        from collate import collate_foveated
         collate_fn = collate_foveated
 
     dataset = create_webdataset(

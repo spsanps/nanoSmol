@@ -35,26 +35,22 @@ torch.backends.cuda.matmul.allow_tf32 = True  # redundant with set_float32_matmu
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # Ensure release/ is importable when run from repo root.
-# Needed for CLI invocation: `python release/train.py` or `torchrun ... release/train.py`
-# sets __file__'s parent as the working dir, but `release.*` imports require the repo root on sys.path.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from release.model import FoveatedVLM
-from release.model.multi_token_vlm import MultiTokenVLM
-from release.data.webdataset_loader import make_dataloader, make_dynamic_dataloader, create_dpo_webdataset
-from release.data.collate import collate_dpo
-from release.data.text_interleave import InterleavedDataLoader
-from release.utils.distributed import (
+from model import FoveatedVLM
+from data import make_dataloader, make_dynamic_dataloader, create_dpo_webdataset
+from collate import collate_dpo
+from text_interleave import InterleavedDataLoader
+from distributed import (
     setup_distributed,
     cleanup_distributed,
     is_main_process,
     get_rank,
     reduce_mean,
 )
-from release.utils.checkpoint import save_checkpoint, load_latest_checkpoint
-from release.utils.lr_schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup, get_converging_schedule
-from release.utils.logging_utils import TrainingLogger
-from release.utils.attention_viz import compute_attention_entropy, save_attention_maps
+from checkpoint import save_checkpoint, load_latest_checkpoint
+from schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup, get_converging_schedule
+from logger import TrainingLogger
+from attention_viz import compute_attention_entropy, save_attention_maps
 
 
 # --------------------------------------------------------------------------- #
@@ -80,17 +76,7 @@ def load_config(path: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 def build_model(cfg: dict, device: torch.device):
-    if cfg["model"].get("multi_token", False):
-        model = MultiTokenVLM(
-            llm_name=cfg["model"]["llm"],
-            dino_name=cfg["model"]["dino"],
-            tokens_per_frame=cfg["model"].get("tokens_per_frame", 16),
-            visual_scale=cfg["model"].get("visual_scale", 0.14),
-        )
-        if is_main_process():
-            print(f"  Model: MultiTokenVLM ({cfg['model'].get('tokens_per_frame', 16)} tokens/frame)")
-    else:
-        model = FoveatedVLM(
+    model = FoveatedVLM(
             llm_name=cfg["model"]["llm"],
             dino_name=cfg["model"]["dino"],
             query_dim=cfg["model"].get("query_dim", 384),

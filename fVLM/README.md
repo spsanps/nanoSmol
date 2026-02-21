@@ -14,7 +14,7 @@ A VLM that compresses each video frame into **1 visual token** via query-guided 
 ```python
 import torch
 from torchvision import transforms
-from release.model import FoveatedVLM
+from model import FoveatedVLM
 
 model = FoveatedVLM(
     llm_name="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -74,27 +74,26 @@ Each frame is encoded by DINOv2, then a learned query propagates through all 12 
 | 3. DPO | RLAIF-V (83K pairs) | DPO (beta=0.1) | 1e-6 |
 
 ```bash
-# Train
-python release/train.py --config release/configs/final/stage1_135M.yaml
+python train.py --config configs/stage1_135M.yaml
 ```
 
 ## Project Structure
 
 ```
-release/                    # Production codebase
-  model/                    # FoveatedVLM, FoveatedEncoder, MultiTokenVLM
-  data/                     # WebDataset loaders, collation, dynamic batching
-  eval/                     # NLG metrics (CIDEr, BLEU, METEOR)
-  utils/                    # Distributed, checkpoint, LR schedule, logging
-  configs/final/            # Production configs (135M + 1.7B, all 3 stages)
-  train.py                  # Training entry point
-  evaluate.py               # Evaluation entry point
-  hf_model_card_README.md   # HuggingFace model card
-
-scripts/                    # Benchmarking and profiling
-  run_benchmarks.py         # MCQ benchmarks (MVBench, Video-MME, ScienceQA)
-
-research/                   # Research artifacts, old experiments, ablations
+model.py          # FoveatedVLM — the model (~1000 lines)
+encoder.py        # FoveatedEncoder — DINO cross-attention
+train.py          # Training loop (all 3 stages + DPO)
+data.py           # WebDataset video/image loader
+collate.py        # Variable-length batch padding
+text_interleave.py # 14% text-only data mixing
+tokenization.py   # Chat-template tokenization for all stages
+benchmark.py      # MCQ evaluation (MVBench, Video-MME, ScienceQA)
+checkpoint.py     # Save/load training state
+logger.py         # wandb + CSV + stdout logging
+schedule.py       # LR schedules (cosine, converging)
+distributed.py    # Multi-GPU DDP setup
+attention_viz.py  # Attention heatmaps + entropy
+configs/          # Training configs (6 YAML files)
 ```
 
 ## Benchmark Results (fVLM-135M)

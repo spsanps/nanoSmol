@@ -1,0 +1,70 @@
+# =============================================================================
+# FINAL Stage 3: DPO — 1.7B
+# =============================================================================
+# Model: SmolLM2-1.7B-Instruct + DINOv2-small
+# Loss: DPO (beta=0.1, reference model = frozen Stage 2 best)
+# LR: 5e-7 all components (low LR typical for DPO)
+# Data: RLAIF-V (83K preference pairs: chosen + rejected)
+# Init: Best Stage 2 checkpoint
+# Reference: Same checkpoint (frozen copy)
+#
+# LR scaling: 135M used 1e-6 -> 1.7B: 1e-6 * 0.28 ~ 5e-7 (rounded up)
+# Memory: DPO = 3 LLM fwd (policy) + ref model (2x model weights in memory)
+#   A100 80GB — grad_ckpt=true, compile=false. DPO needs ~2x SFT memory.
+#   batch_size=8 with grad_accum=4 (eff_batch=32)
+# =============================================================================
+
+stage: 3
+
+model:
+  llm: /workspace/models/SmolLM2-1.7B-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: true
+  init_from: /workspace/checkpoints/final_1.7B/stage2/best.pt
+
+data:
+  train_shards: "/workspace/data/rlaif_v/*.tar"
+  # No val_shards — train loss only
+  max_frames: 64
+  frame_size: 224
+  num_workers: 2
+  prefetch_factor: 2
+  replicate_image_frames: 8
+
+training:
+  total_samples: 83_000
+  batch_size: 8
+  grad_accum: 4
+  lr_connector: 5.0e-7
+  lr_dino: 5.0e-7
+  lr_llm: 5.0e-7
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: cosine
+  dtype: bfloat16
+  compile: true
+  compile_mode: max-autotune
+  seed: 42
+
+loss:
+  type: dpo
+  beta: 0.1
+
+checkpoint:
+  save_dir: /workspace/checkpoints/final_1.7B/stage3
+  save_every_steps: 500
+  keep_last: 2
+  keep_best: 1
+  metric: train_loss
+  resume: auto
+
+# No eval — DPO metric is reward accuracy (chosen > rejected), logged per step.
+
+wandb:
+  project: foveated-vlm-final
+  run_name: stage3-dpo-1.7B
