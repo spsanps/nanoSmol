@@ -81,21 +81,20 @@ python release/train.py --config release/configs/final/stage1_135M.yaml
 ## Project Structure
 
 ```
-release/                    # Canonical codebase
+release/                    # Production codebase
   model/                    # FoveatedVLM, FoveatedEncoder, MultiTokenVLM
   data/                     # WebDataset loaders, collation, dynamic batching
   eval/                     # NLG metrics (CIDEr, BLEU, METEOR)
   utils/                    # Distributed, checkpoint, LR schedule, logging
   configs/final/            # Production configs (135M + 1.7B, all 3 stages)
-  scripts/                  # Data download, preprocessing, analysis
   train.py                  # Training entry point
   evaluate.py               # Evaluation entry point
+  hf_model_card_README.md   # HuggingFace model card
 
 scripts/                    # Benchmarking and profiling
-  run_benchmarks.py         # MCQ benchmark evaluation (MVBench, Video-MME, ScienceQA, POPE)
+  run_benchmarks.py         # MCQ benchmarks (MVBench, Video-MME, ScienceQA)
 
-docs/                       # Documentation
-  hf_model_card_README.md   # HuggingFace model card
+research/                   # Research artifacts, old experiments, ablations
 ```
 
 ## Benchmark Results (fVLM-135M)
