@@ -160,19 +160,23 @@ def decode_sample(sample: dict, max_frames: int = 64,
 
     # On-the-fly tokenization if pre-tokenized data is missing
     if token_ids is None or loss_mask is None:
-        from release.scripts.precompute import tokenize_stage1, tokenize_sft
+        from release.scripts.precompute import (
+            tokenize_stage1, tokenize_sft, SOURCE_PROMPTS, DEFAULT_VISUAL_PROMPT,
+        )
 
         # Unified format: user/assistant keys
         user_text = meta.get("user", "")
         assistant_text = meta.get("assistant", "")
+        source = meta.get("source", "")
 
         if user_text or assistant_text:
             # Has structured user/assistant format
             is_text_only = meta.get("frame_count", 0) == 0
             if stage == 1 and not is_text_only:
-                # Stage 1 visual data: honest conditioning prompt
-                caption = f"{user_text} {assistant_text}".strip() if user_text else assistant_text
-                tok = tokenize_stage1(caption, tokenizer=tokenizer)
+                # Stage 1 visual data: per-source conditioning prompt
+                # Use shard's user field if non-empty, else per-source default
+                user_prompt = user_text if user_text else SOURCE_PROMPTS.get(source, DEFAULT_VISUAL_PROMPT)
+                tok = tokenize_stage1(assistant_text, tokenizer=tokenizer, user_prompt=user_prompt)
             elif stage == 1 and is_text_only:
                 # Stage 1 text retention: keep proper chat format, all-text loss
                 tok = tokenize_sft(
@@ -184,8 +188,10 @@ def decode_sample(sample: dict, max_frames: int = 64,
                 tok["loss_mask"] = [1] * len(tok["token_ids"])
             else:
                 # Stage 2-3: answer-only loss on assistant portion
+                # Use shard's user field if non-empty, else per-source default
+                effective_user = user_text if user_text else SOURCE_PROMPTS.get(source, DEFAULT_VISUAL_PROMPT)
                 tok = tokenize_sft(
-                    user_text or "Describe this.",
+                    effective_user,
                     assistant_text,
                     stage=stage,
                     tokenizer=tokenizer,
@@ -203,10 +209,11 @@ def decode_sample(sample: dict, max_frames: int = 64,
             if not caption or tokenizer is None:
                 return None
 
+            user_prompt = SOURCE_PROMPTS.get(source, DEFAULT_VISUAL_PROMPT)
             if stage == 1:
-                tok = tokenize_stage1(caption, tokenizer=tokenizer)
+                tok = tokenize_stage1(caption, tokenizer=tokenizer, user_prompt=user_prompt)
             else:
-                tok = tokenize_sft("Describe this.", caption, stage=stage, tokenizer=tokenizer)
+                tok = tokenize_sft(user_prompt, caption, stage=stage, tokenizer=tokenizer)
 
         if tokenizer is None:
             return None
@@ -283,6 +290,142 @@ def decode_sample(sample: dict, max_frames: int = 64,
     }
 
 
+def decode_dpo_sample(sample: dict, max_frames: int = 64,
+                      tokenizer=None, replicate_image_frames: int = 1) -> Optional[dict]:
+    """
+    Decode a single DPO webdataset sample into training tensors.
+
+    DPO samples have JSON with keys:
+      user:               user prompt
+      chosen_assistant:   preferred response
+      rejected_assistant: dispreferred response
+      source:             dataset source (e.g. "rlaif_v")
+      frame_count:        number of frames (1 for images)
+
+    Returns None if the sample is malformed (caller should filter).
+
+    Returns dict with:
+      frames:             [T, 3, 224, 224]  shared visual input
+      chosen_input_ids:   [S_c]             tokenized user+chosen
+      chosen_loss_mask:   [S_c]             answer-only mask for chosen
+      rejected_input_ids: [S_r]             tokenized user+rejected
+      rejected_loss_mask: [S_r]             answer-only mask for rejected
+      num_frames:         int               actual frame count
+    """
+    # ------------------------------------------------------------------
+    # 1. Parse metadata JSON
+    # ------------------------------------------------------------------
+    meta_raw = sample.get("json")
+    if meta_raw is None:
+        return None
+
+    if isinstance(meta_raw, bytes):
+        try:
+            meta = json.loads(meta_raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+    elif isinstance(meta_raw, str):
+        try:
+            meta = json.loads(meta_raw)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(meta_raw, dict):
+        meta = meta_raw
+    else:
+        return None
+
+    user_text = meta.get("user", "")
+    chosen_text = meta.get("chosen_assistant", "")
+    rejected_text = meta.get("rejected_assistant", "")
+
+    if not chosen_text or not rejected_text:
+        return None
+    if tokenizer is None:
+        return None
+
+    # ------------------------------------------------------------------
+    # 2. Tokenize chosen and rejected with answer-only loss masks
+    # ------------------------------------------------------------------
+    from release.scripts.precompute import tokenize_sft, SOURCE_PROMPTS, DEFAULT_VISUAL_PROMPT
+
+    source = meta.get("source", "")
+    effective_user = user_text if user_text else SOURCE_PROMPTS.get(source, DEFAULT_VISUAL_PROMPT)
+
+    chosen_tok = tokenize_sft(effective_user, chosen_text, stage=3, tokenizer=tokenizer)
+    rejected_tok = tokenize_sft(effective_user, rejected_text, stage=3, tokenizer=tokenizer)
+
+    # ------------------------------------------------------------------
+    # 3. Collect frames (same logic as decode_sample)
+    # ------------------------------------------------------------------
+    frames: list[torch.Tensor] = []
+
+    mp4_data = sample.get("mp4")
+    if isinstance(mp4_data, bytes) and len(mp4_data) > 100:
+        frames = _decode_mp4_frames(mp4_data, max_frames=max_frames)
+    else:
+        numbered_keys: list[tuple[int, str]] = []
+        for key in sample:
+            m = re.match(r"^(\d{3})\.(jpg|jpeg|png)$", key)
+            if m:
+                numbered_keys.append((int(m.group(1)), key))
+
+        if numbered_keys:
+            numbered_keys.sort(key=lambda x: x[0])
+            for _, key in numbered_keys:
+                raw = sample[key]
+                if isinstance(raw, bytes):
+                    try:
+                        frames.append(_load_image_tensor(raw))
+                    except Exception:
+                        continue
+        else:
+            for ext in ("jpg", "jpeg", "png"):
+                if ext in sample and isinstance(sample[ext], bytes):
+                    try:
+                        frames.append(_load_image_tensor(sample[ext]))
+                    except Exception:
+                        pass
+                    break
+
+    if not frames:
+        return None
+
+    if len(frames) > max_frames:
+        frames = frames[:max_frames]
+
+    if replicate_image_frames > 1 and len(frames) == 1:
+        frames = frames * replicate_image_frames
+
+    num_frames = len(frames)
+    frames_tensor = torch.stack(frames, dim=0)  # [T, 3, 224, 224]
+
+    # ------------------------------------------------------------------
+    # 4. Build text tensors
+    # ------------------------------------------------------------------
+    chosen_ids = torch.tensor(chosen_tok["token_ids"], dtype=torch.long)
+    chosen_mask = torch.tensor(chosen_tok["loss_mask"], dtype=torch.float32)
+    rejected_ids = torch.tensor(rejected_tok["token_ids"], dtype=torch.long)
+    rejected_mask = torch.tensor(rejected_tok["loss_mask"], dtype=torch.float32)
+
+    # Ensure consistent lengths within each pair
+    c_len = min(len(chosen_ids), len(chosen_mask))
+    chosen_ids = chosen_ids[:c_len]
+    chosen_mask = chosen_mask[:c_len]
+
+    r_len = min(len(rejected_ids), len(rejected_mask))
+    rejected_ids = rejected_ids[:r_len]
+    rejected_mask = rejected_mask[:r_len]
+
+    return {
+        "frames": frames_tensor,             # [T, 3, 224, 224]
+        "chosen_input_ids": chosen_ids,       # [S_c]
+        "chosen_loss_mask": chosen_mask,       # [S_c]
+        "rejected_input_ids": rejected_ids,   # [S_r]
+        "rejected_loss_mask": rejected_mask,   # [S_r]
+        "num_frames": num_frames,             # int
+    }
+
+
 def _sample_decoder(max_frames: int, tokenizer=None, stage: int = 1,
                     replicate_image_frames: int = 1):
     """Return a map function for use in a webdataset pipeline."""
@@ -290,6 +433,19 @@ def _sample_decoder(max_frames: int, tokenizer=None, stage: int = 1,
         result = decode_sample(sample, max_frames=max_frames,
                                tokenizer=tokenizer, stage=stage,
                                replicate_image_frames=replicate_image_frames)
+        if result is None:
+            return None
+        return result
+    return _decode
+
+
+def _dpo_sample_decoder(max_frames: int, tokenizer=None,
+                        replicate_image_frames: int = 1):
+    """Return a map function for DPO samples in a webdataset pipeline."""
+    def _decode(sample):
+        result = decode_dpo_sample(sample, max_frames=max_frames,
+                                   tokenizer=tokenizer,
+                                   replicate_image_frames=replicate_image_frames)
         if result is None:
             return None
         return result
@@ -434,6 +590,91 @@ def create_webdataset(
     # bucketed padding is safer and only ~10-15% less efficient.
     # if shuffle:
     #     dataset = dataset.compose(_length_sort_buffer(128))
+
+    if batch_size is not None:
+        dataset = dataset.batched(batch_size)
+
+    return dataset
+
+
+def create_dpo_webdataset(
+    shard_pattern: str,
+    tokenizer=None,
+    max_frames: int = 64,
+    shuffle: bool = True,
+    seed: int = 42,
+    epoch: int = 0,
+    num_workers: int = 4,
+    batch_size: Optional[int] = None,
+    shardshuffle: int = 1000,
+    replicate_image_frames: int = 1,
+) -> wds.WebDataset:
+    """
+    Create a webdataset pipeline for DPO (preference) data.
+
+    Each sample contains chosen and rejected responses for the same visual input.
+    Returns dicts with:
+      frames:             [T, 3, 224, 224]
+      chosen_input_ids:   [S_c]
+      chosen_loss_mask:   [S_c]
+      rejected_input_ids: [S_r]
+      rejected_loss_mask: [S_r]
+      num_frames:         int
+
+    Parameters
+    ----------
+    shard_pattern : str
+        Brace-expansion pattern for tar shards.
+    tokenizer : optional
+        Tokenizer for on-the-fly tokenization.
+    max_frames : int
+        Maximum number of frames per sample.
+    shuffle : bool
+        Whether to shuffle shards and samples.
+    seed : int
+        Random seed for shuffling.
+    epoch : int
+        Epoch counter for per-epoch shuffling.
+    num_workers : int
+        Hint for shard splitting.
+    batch_size : int, optional
+        If provided, batch internally (rare).
+    shardshuffle : int
+        Buffer size for shard-level shuffle.
+    replicate_image_frames : int
+        Replicate single-frame images to N frames.
+    """
+    effective_seed = seed + epoch
+
+    import glob as globmod
+    if isinstance(shard_pattern, list):
+        urls = []
+        for pat in shard_pattern:
+            urls.extend(sorted(globmod.glob(pat)))
+        if not urls:
+            raise ValueError(f"No shards found for patterns: {shard_pattern}")
+    elif '*' in shard_pattern or '?' in shard_pattern:
+        urls = sorted(globmod.glob(shard_pattern))
+        if not urls:
+            raise ValueError(f"No shards found for pattern: {shard_pattern}")
+    else:
+        urls = shard_pattern
+
+    dataset = wds.WebDataset(
+        urls,
+        nodesplitter=wds.split_by_worker,
+        shardshuffle=shardshuffle if shuffle else False,
+        seed=effective_seed if shuffle else None,
+        empty_check=False,
+        handler=wds.warn_and_continue,
+    )
+
+    if shuffle:
+        dataset = dataset.shuffle(size=5000, seed=effective_seed)
+
+    dataset = dataset.map(_dpo_sample_decoder(max_frames, tokenizer=tokenizer,
+                                               replicate_image_frames=replicate_image_frames))
+    dataset = dataset.select(_is_valid)
 
     if batch_size is not None:
         dataset = dataset.batched(batch_size)

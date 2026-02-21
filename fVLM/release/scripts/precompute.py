@@ -42,19 +42,41 @@ def get_tokenizer(model_path: str = "/workspace/models/SmolLM2-135M-Instruct"):
     return _tokenizer
 
 
-def tokenize_stage1(caption: str, tokenizer=None) -> dict:
+# --------------------------------------------------------------------------- #
+# System prompt and per-source conditioning
+# --------------------------------------------------------------------------- #
+
+SYSTEM_PROMPT = "You are a helpful AI assistant."
+
+# Per-source prompts for datasets with empty user field.
+# Matches the actual caption style so the model learns when to use each style.
+SOURCE_PROMPTS = {
+    "openvid": "Write a brief caption for this video.",
+    "webvid": "What would be the WebVid caption for this video?",
+    "vript": "Provide a detailed narration of what happens in this video.",
+    "sharegpt4video": "Describe what happens in this video in detail.",
+}
+DEFAULT_VISUAL_PROMPT = "Describe this."
+
+
+def tokenize_stage1(caption: str, tokenizer=None, user_prompt: str = None) -> dict:
     """
     Stage 1 tokenization: all-text loss on full chat-template caption.
 
-    Format: <|user|>What would be the WebVid caption for this video?<|end|><|assistant|>{caption}<|end|>
-    Loss mask: 1 for ALL text tokens (prompt + caption).
+    Uses explicit system prompt to avoid SmolLM2 template's default
+    "named SmolLM, trained by Hugging Face" injection.
+
+    Loss mask: 1 for ALL text tokens (system + user + assistant).
     """
     if tokenizer is None:
         tokenizer = get_tokenizer()
 
-    prompt = "What would be the WebVid caption for this video?"
+    if user_prompt is None:
+        user_prompt = "Write a brief caption for this video."
+
     messages = [
-        {"role": "user", "content": prompt},
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
         {"role": "assistant", "content": caption},
     ]
 
@@ -72,12 +94,14 @@ def tokenize_sft(user_text: str, assistant_text: str, stage: int = 2, tokenizer=
     """
     Stage 2/3 tokenization: answer-only loss.
 
-    Loss mask: 1 for assistant tokens only, 0 for user/system tokens.
+    Uses explicit system prompt to avoid SmolLM2 template's default injection.
+    Loss mask: 1 for assistant tokens only, 0 for system/user tokens.
     """
     if tokenizer is None:
         tokenizer = get_tokenizer()
 
     messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": assistant_text},
     ]
@@ -86,16 +110,19 @@ def tokenize_sft(user_text: str, assistant_text: str, stage: int = 2, tokenizer=
     encoding = tokenizer(text, add_special_tokens=False, truncation=True, max_length=1024)
     token_ids = encoding["input_ids"]
 
-    # For answer-only loss, we need to find where the assistant response starts.
-    # Tokenize just the user portion to find the split point.
-    user_messages = [{"role": "user", "content": user_text}]
+    # For answer-only loss, find where assistant response starts.
+    # Tokenize system+user portion to find the split point.
+    user_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
     user_text_only = tokenizer.apply_chat_template(
         user_messages, tokenize=False, add_generation_prompt=True
     )
     user_encoding = tokenizer(user_text_only, add_special_tokens=False, truncation=True, max_length=1024)
     user_len = len(user_encoding["input_ids"])
 
-    # Loss mask: 0 for user portion, 1 for assistant portion
+    # Loss mask: 0 for system+user portion, 1 for assistant portion
     loss_mask = [0] * min(user_len, len(token_ids)) + [1] * max(0, len(token_ids) - user_len)
 
     return {"token_ids": token_ids, "loss_mask": loss_mask}
@@ -108,10 +135,11 @@ def tokenize_text_only(user_text: str, assistant_text: str, stage: int = 1, toke
       Stage 2-3: answer-only loss
     """
     if stage == 1:
-        # All-text loss: treat assistant_text as the full response
+        # All-text loss: proper chat format with explicit system prompt
         if tokenizer is None:
             tokenizer = get_tokenizer()
         messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": assistant_text},
         ]

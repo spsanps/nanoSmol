@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from release.model import FoveatedVLM
 from release.model.multi_token_vlm import MultiTokenVLM
-from release.data.webdataset_loader import make_dataloader
+from release.data.webdataset_loader import make_dataloader, create_dpo_webdataset
+from release.data.collate import collate_dpo
 from release.data.text_interleave import InterleavedDataLoader
 from release.utils.distributed import (
     setup_distributed,
@@ -186,6 +187,95 @@ def build_train_loader(cfg: dict, epoch: int = 0):
         )
 
     return vision_loader
+
+
+def build_dpo_train_loader(cfg: dict, epoch: int = 0):
+    """Build the training dataloader for DPO (preference) data."""
+    tokenizer = _get_tokenizer(cfg)
+
+    dataset = create_dpo_webdataset(
+        shard_pattern=cfg["data"]["train_shards"],
+        tokenizer=tokenizer,
+        max_frames=cfg["data"].get("max_frames", 64),
+        shuffle=True,
+        seed=cfg["training"].get("seed", 42),
+        epoch=epoch,
+        num_workers=cfg["data"].get("num_workers", 2),
+        replicate_image_frames=cfg["data"].get("replicate_image_frames", 1),
+    )
+
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=cfg["training"]["batch_size"],
+        num_workers=cfg["data"].get("num_workers", 2),
+        collate_fn=collate_dpo,
+        pin_memory=True,
+        prefetch_factor=cfg["data"].get("prefetch_factor", 2),
+        persistent_workers=cfg["data"].get("num_workers", 2) > 0,
+    )
+    return loader
+
+
+def build_reference_model(cfg: dict, device: torch.device):
+    """
+    Build a frozen reference model for DPO training.
+
+    The reference model is a copy of the policy model loaded from the same
+    init_from checkpoint (the Stage 2 best). All parameters are frozen
+    and the model is set to eval mode.
+    """
+    ref_model = build_model(cfg, device)
+    ref_model.eval()
+    for p in ref_model.parameters():
+        p.requires_grad = False
+    return ref_model
+
+
+def compute_dpo_loss(
+    policy_chosen_logps: torch.Tensor,
+    policy_rejected_logps: torch.Tensor,
+    ref_chosen_logps: torch.Tensor,
+    ref_rejected_logps: torch.Tensor,
+    beta: float = 0.1,
+) -> dict:
+    """
+    Compute the DPO loss and reward accuracy.
+
+    DPO loss = -log_sigmoid(β * ((π_chosen - π_ref_chosen) - (π_rejected - π_ref_rejected)))
+
+    Parameters
+    ----------
+    policy_chosen_logps    : [B]  log-probs from policy on chosen
+    policy_rejected_logps  : [B]  log-probs from policy on rejected
+    ref_chosen_logps       : [B]  log-probs from reference on chosen
+    ref_rejected_logps     : [B]  log-probs from reference on rejected
+    beta                   : float  DPO temperature
+
+    Returns
+    -------
+    dict with keys:
+      loss             : scalar DPO loss
+      reward_accuracy  : float, fraction where chosen is preferred
+      chosen_reward    : [B]   implicit reward for chosen
+      rejected_reward  : [B]   implicit reward for rejected
+    """
+    # Implicit rewards: β * (log π_policy - log π_ref)
+    chosen_reward = beta * (policy_chosen_logps - ref_chosen_logps)
+    rejected_reward = beta * (policy_rejected_logps - ref_rejected_logps)
+
+    # DPO loss: -log σ(r_chosen - r_rejected)
+    logits = chosen_reward - rejected_reward
+    loss = -torch.nn.functional.logsigmoid(logits).mean()
+
+    # Reward accuracy: fraction where chosen is preferred over rejected
+    reward_accuracy = (logits > 0).float().mean().item()
+
+    return {
+        "loss": loss,
+        "reward_accuracy": reward_accuracy,
+        "chosen_reward": chosen_reward,
+        "rejected_reward": rejected_reward,
+    }
 
 
 def build_val_loader(cfg: dict):
@@ -361,11 +451,17 @@ def train(cfg: dict, args):
     # bs=32/16 + high workers caused repeated system OOM crashes.
     # C1-C3 ran stable for hours at bs=8, workers=2, 43-44 samp/s.
 
+    # ---- DPO mode detection ----
+    is_dpo = cfg.get("loss", {}).get("type") == "dpo"
+    dpo_beta = cfg.get("loss", {}).get("beta", 0.1)
+
     if is_main_process():
         print(f"=== fVLM Training: Stage {cfg['stage']} ===")
         print(f"  World size:  {world_size}")
         print(f"  Device:      {device}")
         print(f"  Dtype:       {cfg['training'].get('dtype', 'float32')}")
+        if is_dpo:
+            print(f"  Loss type:   DPO (beta={dpo_beta})")
 
     # ---- Model ----
     model = build_model(cfg, device)
@@ -374,6 +470,16 @@ def train(cfg: dict, args):
         model = DDP(model, device_ids=[rank])
 
     raw_model = model.module if hasattr(model, "module") else model
+
+    # ---- Reference model for DPO (frozen copy from same init checkpoint) ----
+    ref_model = None
+    if is_dpo:
+        if is_main_process():
+            print("  Loading reference model (frozen) ...")
+        ref_model = build_reference_model(cfg, device)
+        if is_main_process():
+            ref_params = sum(p.numel() for p in ref_model.parameters())
+            print(f"  Reference model: {ref_params:,} params (all frozen)")
 
     # ---- Gradient checkpointing (nanochat: trade compute for memory) ----
     if cfg["model"].get("gradient_checkpointing", False):
@@ -476,7 +582,10 @@ def train(cfg: dict, args):
     # ---- Dry run ----
     if args.dry_run:
         if is_main_process():
-            loader = build_train_loader(cfg, epoch=0)
+            if is_dpo:
+                loader = build_dpo_train_loader(cfg, epoch=0)
+            else:
+                loader = build_train_loader(cfg, epoch=0)
             batch = next(iter(loader))
             print(f"\n  Dry run OK:")
             for k, v in batch.items():
@@ -524,8 +633,17 @@ def train(cfg: dict, args):
 
     t0 = time.time()
 
+    # Track DPO metrics across micro-steps for logging
+    dpo_reward_acc_accum = 0.0
+    dpo_chosen_reward_accum = 0.0
+    dpo_rejected_reward_accum = 0.0
+    dpo_micro_count = 0
+
     while global_step < total_steps:
-        train_loader = build_train_loader(cfg, epoch=epoch)
+        if is_dpo:
+            train_loader = build_dpo_train_loader(cfg, epoch=epoch)
+        else:
+            train_loader = build_train_loader(cfg, epoch=epoch)
 
         for batch in train_loader:
             if global_step >= total_steps:
@@ -543,18 +661,75 @@ def train(cfg: dict, args):
 
             with sync_ctx:
                 try:
-                    with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                        outputs = model(
-                            frames=batch["frames"],
-                            input_ids=batch["input_ids"],
-                            attention_mask=batch["attention_mask"],
-                            loss_mask=batch["loss_mask"],
-                            frame_mask=batch.get("frame_mask"),
-                            mode=train_mode,
-                        )
-                        loss = outputs["loss"] / grad_accum
+                    if is_dpo:
+                        # ---- DPO forward pass ----
+                        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                            # Policy model forward
+                            policy_out = raw_model.forward_dpo(
+                                frames=batch["frames"],
+                                chosen_input_ids=batch["chosen_input_ids"],
+                                chosen_attention_mask=batch["chosen_attention_mask"],
+                                chosen_loss_mask=batch["chosen_loss_mask"],
+                                rejected_input_ids=batch["rejected_input_ids"],
+                                rejected_attention_mask=batch["rejected_attention_mask"],
+                                rejected_loss_mask=batch["rejected_loss_mask"],
+                                frame_mask=batch.get("frame_mask"),
+                            )
 
-                    scaler.scale(loss).backward()
+                            # Reference model forward (frozen, no grad)
+                            with torch.no_grad():
+                                ref_out = ref_model.forward_dpo(
+                                    frames=batch["frames"],
+                                    chosen_input_ids=batch["chosen_input_ids"],
+                                    chosen_attention_mask=batch["chosen_attention_mask"],
+                                    chosen_loss_mask=batch["chosen_loss_mask"],
+                                    rejected_input_ids=batch["rejected_input_ids"],
+                                    rejected_attention_mask=batch["rejected_attention_mask"],
+                                    rejected_loss_mask=batch["rejected_loss_mask"],
+                                    frame_mask=batch.get("frame_mask"),
+                                )
+
+                            # Compute DPO loss
+                            dpo_result = compute_dpo_loss(
+                                policy_chosen_logps=policy_out["chosen_logps"],
+                                policy_rejected_logps=policy_out["rejected_logps"],
+                                ref_chosen_logps=ref_out["chosen_logps"],
+                                ref_rejected_logps=ref_out["rejected_logps"],
+                                beta=dpo_beta,
+                            )
+                            loss = dpo_result["loss"] / grad_accum
+
+                            # Store outputs for logging (mimic SFT outputs dict)
+                            outputs = {
+                                "loss": dpo_result["loss"],
+                                "fine_loss": dpo_result["loss"],  # alias for logger
+                                "coarse_loss": torch.tensor(0.0, device=device),
+                                "reward_accuracy": dpo_result["reward_accuracy"],
+                                "chosen_reward": dpo_result["chosen_reward"].mean().item(),
+                                "rejected_reward": dpo_result["rejected_reward"].mean().item(),
+                            }
+
+                        # Accumulate DPO metrics for logging at optimizer step
+                        dpo_reward_acc_accum += dpo_result["reward_accuracy"]
+                        dpo_chosen_reward_accum += dpo_result["chosen_reward"].mean().item()
+                        dpo_rejected_reward_accum += dpo_result["rejected_reward"].mean().item()
+                        dpo_micro_count += 1
+
+                        scaler.scale(loss).backward()
+                    else:
+                        # ---- Standard SFT forward pass ----
+                        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                            outputs = model(
+                                frames=batch["frames"],
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch["attention_mask"],
+                                loss_mask=batch["loss_mask"],
+                                frame_mask=batch.get("frame_mask"),
+                                mode=train_mode,
+                            )
+                            loss = outputs["loss"] / grad_accum
+
+                        scaler.scale(loss).backward()
                 except torch.cuda.OutOfMemoryError:
                     # Rare: batch with too many real frames. Skip and continue.
                     if is_main_process():
@@ -564,6 +739,10 @@ def train(cfg: dict, args):
                     torch.cuda.empty_cache()
                     optimizer.zero_grad(set_to_none=True)
                     micro_step = 0  # reset accumulation
+                    dpo_reward_acc_accum = 0.0
+                    dpo_chosen_reward_accum = 0.0
+                    dpo_rejected_reward_accum = 0.0
+                    dpo_micro_count = 0
                     continue
 
             samples_seen += batch["frames"].shape[0] * world_size
@@ -590,17 +769,67 @@ def train(cfg: dict, args):
                 samples_per_sec = samples_seen / max(elapsed, 1e-6)
                 lr_groups = {g.get("name", "default"): g["lr"]
                              for g in optimizer.param_groups}
-                logger.log_step(
-                    step=global_step,
-                    loss=outputs["loss"].item(),
-                    fine_loss=outputs["fine_loss"].item(),
-                    coarse_loss=outputs["coarse_loss"].item(),
-                    lr=scheduler.get_last_lr()[0],
-                    grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    samples_seen=samples_seen,
-                    samples_per_sec=samples_per_sec,
-                    lr_groups=lr_groups,
-                )
+
+                if is_dpo and dpo_micro_count > 0:
+                    # DPO-specific logging
+                    avg_reward_acc = dpo_reward_acc_accum / dpo_micro_count
+                    avg_chosen_reward = dpo_chosen_reward_accum / dpo_micro_count
+                    avg_rejected_reward = dpo_rejected_reward_accum / dpo_micro_count
+                    reward_margin = avg_chosen_reward - avg_rejected_reward
+
+                    print(
+                        f"  step {global_step:6d} | dpo_loss {outputs['loss'].item():.4f} | "
+                        f"rew_acc {avg_reward_acc:.3f} | margin {reward_margin:.3f} | "
+                        f"lr {scheduler.get_last_lr()[0]:.2e} | "
+                        f"gnorm {(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm):.2f} | "
+                        f"{samples_per_sec:.0f} samp/s",
+                        flush=True,
+                    )
+
+                    # Log to wandb/CSV via logger (use fine_loss slot for DPO loss)
+                    logger.log_step(
+                        step=global_step,
+                        loss=outputs["loss"].item(),
+                        fine_loss=outputs["loss"].item(),
+                        coarse_loss=0.0,
+                        lr=scheduler.get_last_lr()[0],
+                        grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                        samples_seen=samples_seen,
+                        samples_per_sec=samples_per_sec,
+                        lr_groups=lr_groups,
+                    )
+
+                    # Log DPO-specific metrics to wandb
+                    try:
+                        import wandb
+                        if wandb.run is not None:
+                            wandb.log({
+                                "dpo/reward_accuracy": avg_reward_acc,
+                                "dpo/chosen_reward": avg_chosen_reward,
+                                "dpo/rejected_reward": avg_rejected_reward,
+                                "dpo/reward_margin": reward_margin,
+                            }, step=global_step)
+                    except Exception:
+                        pass
+
+                    # Reset DPO accumulators
+                    dpo_reward_acc_accum = 0.0
+                    dpo_chosen_reward_accum = 0.0
+                    dpo_rejected_reward_accum = 0.0
+                    dpo_micro_count = 0
+                else:
+                    # Standard SFT logging
+                    logger.log_step(
+                        step=global_step,
+                        loss=outputs["loss"].item(),
+                        fine_loss=outputs["fine_loss"].item(),
+                        coarse_loss=outputs["coarse_loss"].item(),
+                        lr=scheduler.get_last_lr()[0],
+                        grad_norm=grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                        samples_seen=samples_seen,
+                        samples_per_sec=samples_per_sec,
+                        lr_groups=lr_groups,
+                    )
 
             # ---- Evaluation ----
             if val_loader is not None and global_step % eval_every == 0:
@@ -628,6 +857,9 @@ def train(cfg: dict, args):
                     model.train()
                 elif val_loader is not None:
                     metric = val_result["val_loss"]  # reuse from eval above
+                else:
+                    # No val_loader — use train loss as metric (pretraining style)
+                    metric = outputs["loss"].item() if isinstance(outputs["loss"], torch.Tensor) else outputs["loss"]
                 save_checkpoint(
                     model=model,
                     optimizer=optimizer,
@@ -651,7 +883,8 @@ def train(cfg: dict, args):
 
     if is_main_process():
         elapsed = time.time() - t0
-        logger.save_run_summary(final_loss=outputs["loss"].item(), total_samples=samples_seen)
+        final_loss = outputs["loss"].item() if isinstance(outputs["loss"], torch.Tensor) else outputs["loss"]
+        logger.save_run_summary(final_loss=final_loss, total_samples=samples_seen)
         logger.finish()
         print(f"\n  Training complete: {global_step} steps, "
               f"{samples_seen:,} samples, {elapsed/3600:.1f}h")

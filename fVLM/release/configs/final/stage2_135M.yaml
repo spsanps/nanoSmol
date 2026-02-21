@@ -4,7 +4,8 @@
 # Model: SmolLM2-135M-Instruct + DINOv2-small
 # Loss: Answer-only CE (mask user/system tokens)
 # LR: Flat 3e-5 all components (1:1, SmolVLM2 style) + cosine decay
-# Data: Cauldron full (2M) + 14% SmolTalk S2 text retention
+# Data: Cauldron (2M images) + all video (~1.6M) + 14% SmolTalk S2 text
+# Mix: ~55% image, ~45% video (natural shard ratio), +14% text interleave
 # Images: Replicated to 8 frames (A8 sweep winner)
 # Init: Best Stage 1 checkpoint
 # =============================================================================
@@ -22,8 +23,17 @@ model:
   init_from: /workspace/checkpoints/final/stage1/best.pt
 
 data:
-  train_shards: "/workspace/data/cauldron_full/*.tar"
-  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  train_shards:
+    - "/workspace/data/cauldron_full/*.tar"
+    - "/workspace/data/openvid/*.tar"
+    - "/workspace/data/webvid/*.tar"
+    - "/workspace/data/vista_shards/*.tar"
+    - "/workspace/data/vista_extra_shards/*.tar"
+    - "/workspace/data/vript_long_shards/*.tar"
+    - "/workspace/data/vript_shards/*.tar"
+    - "/workspace/data/sharegpt4video_shards/*.tar"
+    - "/workspace/data/stage3_youtube/*.tar"
+  # No val_shards — pretraining-style, train loss only
   text_shards: "/workspace/data/text_retention/stage2/*.tar"
   text_ratio: 0.14
   max_frames: 64
@@ -44,7 +54,7 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: true
+  compile: false                          # 135M too small for torch.compile (40% regression)
   seed: 42
 
 loss:
@@ -55,12 +65,10 @@ checkpoint:
   save_every_steps: 1000
   keep_last: 2
   keep_best: 1
-  metric: val_loss
+  metric: train_loss                       # no eval — train loss is the signal for pretraining
   resume: auto
 
-eval:
-  every_steps: 250
-  max_samples: 1000
+# No eval — pretraining-style, train loss only. Saves ~6min/1M samples.
 
 wandb:
   project: foveated-vlm-final

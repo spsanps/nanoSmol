@@ -1,14 +1,12 @@
 # =============================================================================
-# FINAL Stage 3: Video SFT — 135M
+# FINAL Stage 3: DPO — 135M
 # =============================================================================
 # Model: SmolLM2-135M-Instruct + DINOv2-small
-# Loss: Answer-only CE
-# LR: Flat 3e-5 all components (1:1, SmolVLM2 style) + cosine decay
-# Data: Video-heavy mix (VISTA + Vript + ShareGPT4Video + LLaVA YouTube)
-#       + Cauldron images (retain image capability) + 14% SmolTalk S3
-# Images in mix: Replicated to 8 frames
+# Loss: DPO (β=0.1, reference model = frozen Stage 2 best)
+# LR: 1e-6 all components (low LR typical for DPO)
+# Data: RLAIF-V (83K preference pairs: chosen + rejected)
 # Init: Best Stage 2 checkpoint
-# EXCLUDED: LLaVA-Video-178K (67% truncated at 64-frame cap)
+# Reference: Same checkpoint (frozen copy)
 # =============================================================================
 
 stage: 3
@@ -24,53 +22,43 @@ model:
   init_from: /workspace/checkpoints/final/stage2/best.pt
 
 data:
-  train_shards:
-    - "/workspace/data/vista_shards/*.tar"
-    - "/workspace/data/vista_extra_shards/*.tar"
-    - "/workspace/data/sharegpt4video_shards/*.tar"
-    - "/workspace/data/stage3_youtube/*.tar"
-    - "/workspace/data/vript_long_shards/*.tar"
-    - "/workspace/data/vript_shards/*.tar"
-    - "/workspace/data/cauldron_full/*.tar"
-  val_shards: "/workspace/data/eval/val_10k/*.tar"
-  text_shards: "/workspace/data/text_retention/stage3/*.tar"
-  text_ratio: 0.14
+  train_shards: "/workspace/data/rlaif_v/*.tar"
+  # No val_shards — train loss only
   max_frames: 64
   frame_size: 224
   num_workers: 2
   prefetch_factor: 2
-  replicate_image_frames: 8
+  replicate_image_frames: 8                # RLAIF-V is image-only
 
 training:
-  total_samples: 500_000
-  batch_size: 8
-  grad_accum: 4
-  lr_connector: 3.0e-5
-  lr_dino: 3.0e-5
-  lr_llm: 3.0e-5
-  warmup_ratio: 0.03
+  total_samples: 83_000                    # 1 epoch of RLAIF-V
+  batch_size: 4                            # DPO needs chosen+rejected per sample (2x memory)
+  grad_accum: 8                            # eff batch = 32
+  lr_connector: 1.0e-6
+  lr_dino: 1.0e-6
+  lr_llm: 1.0e-6
+  warmup_ratio: 0.1
   weight_decay: 0.01
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: false                          # dynamic frame counts break torch.compile
+  compile: false
   seed: 42
 
 loss:
-  type: text_ce_answer_only
+  type: dpo                                # requires DPO collate + loss implementation
+  beta: 0.1                                # DPO temperature
 
 checkpoint:
   save_dir: /workspace/checkpoints/final/stage3
   save_every_steps: 500
   keep_last: 2
   keep_best: 1
-  metric: val_loss
+  metric: train_loss
   resume: auto
 
-eval:
-  every_steps: 250
-  max_samples: 1000
+# No eval — DPO metric is reward accuracy (chosen > rejected), logged per step.
 
 wandb:
   project: foveated-vlm-final
-  run_name: stage3-135M
+  run_name: stage3-dpo-135M

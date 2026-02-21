@@ -193,7 +193,9 @@ Stage 1 captions are noisy stock-video-ese. The per-source prompts teach visual 
 | **Frame count** | Variable: `min(video_duration_seconds, 64)` |
 | **Long video fallback** | Videos >64s: uniform spacing (evenly spaced, still 64 max) |
 | **Resolution** | 224×224 (DINOv2-small native) |
-| **Images in training** | Replicated to **8 frames** (A8 sweep: N=8 best at 2.858, N=4 close at 2.868, N=1/16 worse) |
+| **Images in training** | Replicated to **8 static frames** (A8 sweep: N=8 best at 2.858, N=4 close at 2.868, N=1/16 worse) |
+| **Images in eval** | Also replicated to 8 static frames — model treats all inputs as video |
+| **Key design point** | Images ARE videos (8 identical frames). The foveated mechanism operates on all inputs uniformly. No separate image/video code path. |
 
 ---
 
@@ -240,19 +242,34 @@ SmolTalk is split into 3 stages that match our training stages:
 
 ### Benchmarks
 
-| Benchmark | Type | Status |
-|-----------|------|--------|
-| Video-MME | Video MCQ (2,700 Q) | Videos downloaded |
-| MVBench | Video MCQ (4,000 Q) | Videos downloaded |
-| MLVU | Video MCQ | Annotations only (videos deferred) |
-| Val 10K | Mixed held-out | Ready |
+**Video benchmarks:**
 
-### Baselines
+| Benchmark | Type | Samples | Status |
+|-----------|------|---------|--------|
+| Video-MME | Video MCQ (4-choice) | 2,700 | Running (all 3 modes) |
+| MVBench | Video MCQ (4-choice, 20 categories) | 3,800 | Running (all 3 modes) |
+| MLVU | Video MCQ | 1,122 videos | Deferred (no video files, annotations only) |
+| Val 10K | Mixed loss eval | 1,000 | Running (all 3 modes) |
 
-| Baseline | Source | Purpose |
-|----------|--------|---------|
-| SmolVLM2-256M | HuggingFace (pretrained) | Direct param-count comparison |
-| SmolVLM2-2.2B | HuggingFace (pretrained) | Quality upper bound |
+**Image benchmarks (images treated as 8-frame replicated video):**
+
+| Benchmark | Type | Samples | Status |
+|-----------|------|---------|--------|
+| POPE | Yes/No hallucination detection (3 splits) | 9,000 | Downloading |
+| ScienceQA | Image MCQ (science) | ~2,000 | Downloading |
+
+**Method:** Log-likelihood MCQ scoring — compute loss per answer option, pick lowest loss. All benchmarks evaluated in all 3 modes.
+
+### Baselines (SmolVLM2 published scores)
+
+| Model | Params | MVBench | Video-MME | TextVQA | ScienceQA | POPE |
+|-------|--------|---------|-----------|---------|-----------|------|
+| SmolVLM2-256M-Video | 256M | 32.7% | 33.7% | 50.2% | 73.8% | — |
+| SmolVLM2-2.2B | 2.2B | 46.3% | 52.1% | — | — | — |
+| Random (4-choice) | — | 25.0% | 25.0% | — | — | 50.0% |
+| **fVLM-135M (ours)** | **157M** | **~28%** | **~29%** | — | — | — |
+
+Note: fVLM-135M is ~40% smaller than SmolVLM2-256M. Scores are preliminary, final results pending.
 
 ---
 

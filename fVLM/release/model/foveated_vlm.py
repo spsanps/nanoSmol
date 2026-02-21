@@ -447,6 +447,135 @@ class FoveatedVLM(nn.Module):
         }
 
     # ------------------------------------------------------------------
+    # Forward mode: DPO (preference training)
+    # ------------------------------------------------------------------
+
+    def forward_dpo(
+        self,
+        frames: torch.Tensor,
+        chosen_input_ids: torch.Tensor,
+        chosen_attention_mask: torch.Tensor,
+        chosen_loss_mask: torch.Tensor,
+        rejected_input_ids: torch.Tensor,
+        rejected_attention_mask: torch.Tensor,
+        rejected_loss_mask: torch.Tensor,
+        frame_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        DPO forward pass: run coarse+fine on both chosen and rejected sequences.
+
+        Shares DINO encoding across chosen and rejected (same visual input).
+        Returns per-sample sum of log-probabilities for both chosen and rejected,
+        masked by loss_mask (answer-only tokens).
+
+        Parameters
+        ----------
+        frames                  : [B, T, 3, 224, 224]
+        chosen_input_ids        : [B, S_c]
+        chosen_attention_mask   : [B, S_c]
+        chosen_loss_mask        : [B, S_c]  (1 = answer token, 0 = prompt/pad)
+        rejected_input_ids      : [B, S_r]
+        rejected_attention_mask : [B, S_r]
+        rejected_loss_mask      : [B, S_r]
+        frame_mask              : [B, T] bool (optional)
+
+        Returns
+        -------
+        dict with keys:
+          chosen_logps    : [B]  per-sample sum of log-probs on chosen answer tokens
+          rejected_logps  : [B]  per-sample sum of log-probs on rejected answer tokens
+          chosen_logits   : [B, T+S_c, V]  full logits for chosen
+          rejected_logits : [B, T+S_r, V]  full logits for rejected
+        """
+        B, T = frames.shape[:2]
+
+        # ---- Step 0: Encode all frames (DINO, shared across chosen & rejected) ----
+        kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
+
+        # ---- Coarse pass (shared, used for dynamic query generation) ----
+        q_static = self.q_static.expand(B, -1)                          # [B, qd]
+        z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat, patch_features)
+        z_coarse_llm = self._project_visual(z_coarse)                    # [B, T, ld]
+
+        # Run coarse LLM to get dynamic queries (use chosen text for query generation)
+        text_embeds_chosen = self._embed_text(chosen_input_ids)          # [B, S_c, ld]
+        seq_coarse = torch.cat([z_coarse_llm, text_embeds_chosen], dim=1)
+        out_coarse = self.llm.model(inputs_embeds=seq_coarse)
+        h_coarse = out_coarse.last_hidden_state
+
+        # Extract dynamic queries from visual positions
+        h_visual_coarse = h_coarse[:, :T, :]                            # [B, T, ld]
+        queries = self.llm_to_query(h_visual_coarse)                     # [B, T, qd]
+
+        q_init = self.q_init.expand(B, 1, -1)
+        shifted_queries = torch.cat([q_init, queries[:, :-1]], dim=1)    # [B, T, qd]
+
+        # ---- Fine pass: shared visual features ----
+        z_fine = self._query_all_frames_batched(shifted_queries, kv_cache, B, T, mask_flat, patch_features)
+        z_fine_llm = self._project_visual(z_fine)                        # [B, T, ld]
+
+        # ---- Forward on CHOSEN ----
+        seq_chosen = torch.cat([z_fine_llm, text_embeds_chosen], dim=1)  # [B, T+S_c, ld]
+        out_chosen = self.llm.model(inputs_embeds=seq_chosen)
+        chosen_logits = self.llm.lm_head(out_chosen.last_hidden_state)  # [B, T+S_c, V]
+
+        # ---- Forward on REJECTED ----
+        text_embeds_rejected = self._embed_text(rejected_input_ids)      # [B, S_r, ld]
+        seq_rejected = torch.cat([z_fine_llm, text_embeds_rejected], dim=1)
+        out_rejected = self.llm.model(inputs_embeds=seq_rejected)
+        rejected_logits = self.llm.lm_head(out_rejected.last_hidden_state)
+
+        # ---- Compute per-token log-probs ----
+        chosen_logps = self._sequence_logprobs(
+            chosen_logits, chosen_input_ids, chosen_loss_mask, T,
+        )
+        rejected_logps = self._sequence_logprobs(
+            rejected_logits, rejected_input_ids, rejected_loss_mask, T,
+        )
+
+        return {
+            "chosen_logps": chosen_logps,       # [B]
+            "rejected_logps": rejected_logps,   # [B]
+            "chosen_logits": chosen_logits,     # [B, T+S_c, V]
+            "rejected_logits": rejected_logits, # [B, T+S_r, V]
+        }
+
+    def _sequence_logprobs(
+        self,
+        logits: torch.Tensor,
+        input_ids: torch.Tensor,
+        loss_mask: torch.Tensor,
+        T: int,
+    ) -> torch.Tensor:
+        """
+        Compute per-sample sum of log-probabilities on answer tokens.
+
+        logits    : [B, T+S, V]  full sequence logits (visual + text)
+        input_ids : [B, S]       text token ids
+        loss_mask : [B, S]       1.0 for answer tokens, 0.0 otherwise
+        T         : int          number of visual token positions
+
+        Returns   : [B]          sum of log-probs per sample
+        """
+        B, S = input_ids.shape
+
+        # Extract text logits and shift for autoregressive prediction
+        text_logits = logits[:, T:, :]                                # [B, S, V]
+        shift_logits = text_logits[:, :-1, :]                         # [B, S-1, V]
+        shift_labels = input_ids[:, 1:]                               # [B, S-1]
+        shift_mask = loss_mask[:, 1:]                                 # [B, S-1]
+
+        # Per-token log-probs: log_softmax then gather the label's prob
+        log_probs = F.log_softmax(shift_logits, dim=-1)              # [B, S-1, V]
+        per_token_logps = log_probs.gather(
+            dim=-1, index=shift_labels.unsqueeze(-1),
+        ).squeeze(-1)                                                 # [B, S-1]
+
+        # Mask and sum per sample
+        per_token_logps = per_token_logps * shift_mask                # zero out non-answer tokens
+        return per_token_logps.sum(dim=-1)                            # [B]
+
+    # ------------------------------------------------------------------
     # Forward mode 2: Coarse only (FAST EVAL)
     # ------------------------------------------------------------------
 
