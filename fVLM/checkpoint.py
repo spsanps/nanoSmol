@@ -87,7 +87,8 @@ def save_checkpoint(
     model_to_save = model.module if hasattr(model, "module") else model
 
     checkpoint = {
-        "model_state_dict": model_to_save.state_dict(),
+        "model_state_dict": {k.replace("._orig_mod", ""): v
+                             for k, v in model_to_save.state_dict().items()},
         "optimizer_state_dict": optimizer.state_dict(),
         "scaler_state_dict": scaler.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
@@ -169,9 +170,12 @@ def load_latest_checkpoint(
     print(f"  Resuming from {ckpt_path} ...")
     ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=False)
 
-    # Model
+    # Model — strip torch.compile's _orig_mod prefix if present
     model_to_load = model.module if hasattr(model, "module") else model
-    model_to_load.load_state_dict(ckpt["model_state_dict"])
+    state_dict = ckpt["model_state_dict"]
+    if any(k.startswith("encoder._orig_mod.") or k.startswith("llm._orig_mod.") for k in state_dict):
+        state_dict = {k.replace("._orig_mod", ""): v for k, v in state_dict.items()}
+    model_to_load.load_state_dict(state_dict)
 
     # Optimizer
     if optimizer is not None and "optimizer_state_dict" in ckpt:
