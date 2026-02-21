@@ -19,6 +19,13 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoConfig
 from typing import Dict, Optional
 
+# Optional: Liger Kernel fused CE loss (never materializes [B, S, V] logits)
+try:
+    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
+    _HAS_LIGER = True
+except ImportError:
+    _HAS_LIGER = False
+
 
 class FoveatedVLM(nn.Module):
     """
@@ -48,6 +55,7 @@ class FoveatedVLM(nn.Module):
         visual_scale: float = 0.14,
         lambda_coarse: float = 0.0,
         deep_query: bool = True,
+        use_fused_ce: bool = False,
     ):
         super().__init__()
 
@@ -84,6 +92,7 @@ class FoveatedVLM(nn.Module):
         self.lambda_coarse = lambda_coarse
         self.query_dim = query_dim
         self.deep_query = deep_query
+        self.use_fused_ce = use_fused_ce and _HAS_LIGER
 
         # ---- Dimension bookkeeping (useful for external code) ----
         self.dino_dim = dino_dim
@@ -333,6 +342,44 @@ class FoveatedVLM(nn.Module):
         )
         return loss
 
+    def _fused_ce_loss(
+        self,
+        hidden_states: torch.Tensor,
+        labels: torch.Tensor,
+        loss_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Fused lm_head + CE loss via Liger Kernel.
+
+        Never materializes the [B, S, V] logits tensor — computes CE in chunks
+        inside the fused kernel.  Saves ~2× memory on the loss computation.
+
+        hidden_states : [B, S, ld]  (LLM hidden states, NOT yet projected by lm_head)
+        labels        : [B, S]      (token ids)
+        loss_mask     : [B, S]      (1 = compute loss, 0 = ignore)
+
+        Returns scalar loss.
+        """
+        # Shift: predict position i+1 from position i
+        h_input = hidden_states[:, :-1, :].contiguous()  # [B, S-1, ld]
+        shift_labels = labels[:, 1:].contiguous()         # [B, S-1]
+
+        if loss_mask is not None:
+            shift_mask = loss_mask[:, 1:].contiguous()
+            pad_id = self._get_pad_token_id()
+            shift_labels = shift_labels.clone()
+            shift_labels[shift_mask == 0] = pad_id
+
+        # Flatten for Liger: [B*(S-1), ld] and [B*(S-1)]
+        BSminus1 = h_input.shape[0] * h_input.shape[1]
+        return LigerFusedLinearCrossEntropyLoss(
+            ignore_index=self._get_pad_token_id()
+        )(
+            h_input.reshape(BSminus1, -1),
+            self.llm.lm_head.weight,
+            shift_labels.reshape(-1),
+        )
+
     # ------------------------------------------------------------------
     # Forward mode 1: Coarse+Fine (TRAINING)
     # ------------------------------------------------------------------
@@ -403,17 +450,18 @@ class FoveatedVLM(nn.Module):
         out_fine = self.llm.model(inputs_embeds=seq_fine)
         h_fine = out_fine.last_hidden_state                        # [B,T+S,ld]
 
-        # Compute logits on TEXT positions only (visual positions are masked
-        # in loss anyway). Saves lm_head compute on T positions and avoids
-        # allocating the [B,T,V] portion of the logits tensor (~1.2 GB).
-        h_text = h_fine[:, T:, :]                                  # [B,S,ld]
-        logits_text = self.llm.lm_head(h_text)                    # [B,S,V]
-
         # ---- Loss on text portion ----
+        h_text = h_fine[:, T:, :]                                  # [B,S,ld]
         if loss_mask is None:
             loss_mask = attention_mask.float()
 
-        fine_loss = self._ce_loss(logits_text, input_ids, loss_mask)
+        if self.use_fused_ce:
+            # Liger Kernel: fused lm_head + CE, never materializes [B,S,V] logits
+            fine_loss = self._fused_ce_loss(h_text, input_ids, loss_mask)
+            logits_text = None  # not available with fused loss
+        else:
+            logits_text = self.llm.lm_head(h_text)                # [B,S,V]
+            fine_loss = self._ce_loss(logits_text, input_ids, loss_mask)
 
         # ---- Optional auxiliary coarse loss ----
         coarse_loss = torch.tensor(0.0, device=frames.device)
@@ -421,8 +469,11 @@ class FoveatedVLM(nn.Module):
             seq_coarse_full = torch.cat([z_coarse_llm, text_embeds], dim=1)
             out_coarse_full = self.llm.model(inputs_embeds=seq_coarse_full)
             h_coarse_text = out_coarse_full.last_hidden_state[:, T:, :]
-            logits_coarse = self.llm.lm_head(h_coarse_text)
-            coarse_loss = self._ce_loss(logits_coarse, input_ids, loss_mask)
+            if self.use_fused_ce:
+                coarse_loss = self._fused_ce_loss(h_coarse_text, input_ids, loss_mask)
+            else:
+                logits_coarse = self.llm.lm_head(h_coarse_text)
+                coarse_loss = self._ce_loss(logits_coarse, input_ids, loss_mask)
 
         # ---- Combined loss ----
         loss = fine_loss + self.lambda_coarse * coarse_loss
@@ -607,9 +658,7 @@ class FoveatedVLM(nn.Module):
         # dtype handled by autocast on GPU; float32 on CPU
 
         out = self.llm.model(inputs_embeds=seq)
-        logits = self.llm.lm_head(out.last_hidden_state)
-
-        result: Dict[str, torch.Tensor] = {"logits": logits}
+        h = out.last_hidden_state                         # [B, T+S, ld]
 
         if input_ids is not None:
             S = input_ids.shape[1]
@@ -632,10 +681,20 @@ class FoveatedVLM(nn.Module):
             else:
                 full_loss_mask = None
 
-            loss = self._ce_loss(logits, full_labels, full_loss_mask)
-            result["loss"] = loss
+            if self.use_fused_ce and self.training:
+                # Fused CE: skip lm_head, never materializes [B, T+S, V]
+                loss = self._fused_ce_loss(h, full_labels, full_loss_mask)
+                logits = None
+            else:
+                logits = self.llm.lm_head(h)
+                loss = self._ce_loss(logits, full_labels, full_loss_mask)
+
+            result: Dict[str, torch.Tensor] = {"logits": logits, "loss": loss}
             result["coarse_loss"] = loss
             result["fine_loss"] = torch.tensor(0.0, device=frames.device)
+        else:
+            logits = self.llm.lm_head(h)
+            result: Dict[str, torch.Tensor] = {"logits": logits}
 
         return result
 
@@ -782,8 +841,28 @@ class FoveatedVLM(nn.Module):
         """
         Unified forward entry point.
 
-        mode : "coarse_fine" | "coarse_only" | "autoregressive"
-        frame_mask : [B, T] bool — True for real frames, False for padding.
+        Parameters
+        ----------
+        frames : Tensor [B, T, 3, 224, 224]
+            Preprocessed video frames (DINOv2 normalization).
+            For **video**: T = number of sampled frames (1-64).
+            For **images**: replicate the single frame to T=8 to match training
+            distribution (``frame.unsqueeze(0).repeat(8, 1, 1, 1)``).
+            The model was trained with ``replicate_image_frames: 8`` in
+            Stages 2-3, so single-frame image input will produce degraded
+            results.
+        input_ids : Tensor [B, S]
+            Tokenized text (prompt + response).
+        attention_mask : Tensor [B, S]
+            1 for real tokens, 0 for padding.
+        loss_mask : Tensor [B, S], optional
+            1 for tokens that contribute to loss, 0 to skip.
+        frame_mask : Tensor [B, T] bool, optional
+            True for real frames, False for padding (for variable-length batches).
+        mode : str
+            "coarse_fine"    — two-pass parallel forward (recommended, uses foveation)
+            "coarse_only"    — single static-query pass (fastest, no foveation)
+            "autoregressive" — sequential inference with KV cache
         """
         if mode == "coarse_fine":
             return self.forward_coarse_fine(frames, input_ids, attention_mask, loss_mask, frame_mask)

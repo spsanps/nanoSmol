@@ -11,7 +11,7 @@
 #
 # LR scaling: 135M used 3e-5 -> 1.7B: 3e-5 * 0.28 ~ 1e-5
 # Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed
-# Stage 1 verified: bs=32, grad_ckpt=true, compile=false → 12 samp/s, 32GB peak, 100% GPU
+# Optimized: Liger FLCE + no grad ckpt + compile + dynamic batching
 # =============================================================================
 
 stage: 2
@@ -23,7 +23,8 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
+  use_fused_ce: true
   init_from: /workspace/checkpoints/final_1.7B/stage1/best.pt
 
 data:
@@ -58,7 +59,8 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: false
+  compile: true
+  compile_mode: default
   seed: 42
 
 loss:

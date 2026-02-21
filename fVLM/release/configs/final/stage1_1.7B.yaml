@@ -10,9 +10,9 @@
 #
 # LR scaling: 1/sqrt(1711/135) ~ 0.28x from 135M (mu-parametrization inspired)
 # Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed
-# Optimized: coarse pass skip text (31% gain), dynamic batching (variable bs),
-# torch.compile with use_reentrant=False (fixes compile+grad_ckpt NaN)
-# Throughput: ~15.7 samp/s fixed bs=32, target ~25+ samp/s with all opts
+# Optimized: coarse text skip + dynamic batching + compile + Liger FLCE
+# Liger Kernel FusedLinearCrossEntropyLoss: fuses lm_head + CE, saves ~2GB VRAM
+# No gradient checkpointing: saves 20-30% compute, fits in 80GB budget
 # =============================================================================
 
 stage: 1
@@ -24,7 +24,8 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
+  use_fused_ce: true
 
 data:
   train_shards:
@@ -42,8 +43,8 @@ training:
   batch_size: 32
   grad_accum: 1
   dynamic_batching: true
-  max_total_frames: 512
-  max_batch_size: 64
+  max_total_frames: 768
+  max_batch_size: 96
   lr_connector: 3.0e-4
   lr_dino: 3.0e-6
   lr_llm: 3.0e-6

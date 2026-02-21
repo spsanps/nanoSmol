@@ -35,6 +35,8 @@ torch.backends.cuda.matmul.allow_tf32 = True  # redundant with set_float32_matmu
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # Ensure release/ is importable when run from repo root.
+# Needed for CLI invocation: `python release/train.py` or `torchrun ... release/train.py`
+# sets __file__'s parent as the working dir, but `release.*` imports require the repo root on sys.path.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from release.model import FoveatedVLM
@@ -95,6 +97,7 @@ def build_model(cfg: dict, device: torch.device):
             visual_scale=cfg["model"].get("visual_scale", 0.14),
             lambda_coarse=cfg["model"].get("lambda_coarse", 0.0),
             deep_query=cfg["model"].get("deep_query", True),
+            use_fused_ce=cfg["model"].get("use_fused_ce", False),
         )
 
     # Initialise from a previous-stage checkpoint (Stage 2 loads Stage 1, etc.)
