@@ -10,8 +10,8 @@
 # Init: Best Stage 1 checkpoint
 #
 # LR scaling: 135M used 3e-5 -> 1.7B: 3e-5 * 0.28 ~ 1e-5
-# Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed, ~59GB free
-# Stage 1 verified: batch_size=16 → 57GB, 100% GPU util, 8 samp/s, 0 OOMs
+# Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed
+# Stage 1 verified: bs=32, grad_ckpt=true, compile=false → 12 samp/s, 32GB peak, 100% GPU
 # =============================================================================
 
 stage: 2
@@ -23,7 +23,7 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   init_from: /workspace/checkpoints/final_1.7B/stage1/best.pt
 
 data:
@@ -48,8 +48,8 @@ data:
 
 training:
   total_samples: 1_000_000
-  batch_size: 16
-  grad_accum: 2
+  batch_size: 32
+  grad_accum: 1
   lr_connector: 1.0e-5
   lr_dino: 1.0e-5
   lr_llm: 1.0e-5
@@ -58,7 +58,7 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: true
+  compile: false
   seed: 42
 
 loss:

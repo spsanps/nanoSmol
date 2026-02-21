@@ -9,9 +9,9 @@
 # Reference: Same checkpoint (frozen copy)
 #
 # LR scaling: 135M used 1e-6 -> 1.7B: 1e-6 * 0.28 ~ 5e-7 (rounded up)
-# Memory: DPO = 3 LLM fwd (policy) + ref model (~24.3GB fixed with bf16)
-#   A100 80GB — batch_size=4 with grad_accum=8 (eff_batch=32), no grad ckpt needed
-# Stage 1 verified: bf16 weights → 100% GPU util at batch_size=16 SFT
+# Memory: DPO = 3 LLM fwd (policy) + ref model (2x model weights in memory)
+#   A100 80GB — grad_ckpt=true, compile=false. DPO needs ~2x SFT memory.
+#   batch_size=8 with grad_accum=4 (eff_batch=32)
 # =============================================================================
 
 stage: 3
@@ -23,7 +23,7 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   init_from: /workspace/checkpoints/final_1.7B/stage2/best.pt
 
 data:
@@ -37,8 +37,8 @@ data:
 
 training:
   total_samples: 83_000
-  batch_size: 4
-  grad_accum: 8
+  batch_size: 8
+  grad_accum: 4
   lr_connector: 5.0e-7
   lr_dino: 5.0e-7
   lr_llm: 5.0e-7
@@ -47,7 +47,7 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: true
+  compile: false
   seed: 42
 
 loss:

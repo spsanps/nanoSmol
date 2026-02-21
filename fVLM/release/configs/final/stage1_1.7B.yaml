@@ -9,9 +9,9 @@
 # Text retention: Proper chat format (not wrapped in WebVid prompt)
 #
 # LR scaling: 1/sqrt(1711/135) ~ 0.28x from 135M (mu-parametrization inspired)
-# Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed, ~59GB free
-# Verified: batch_size=16 → 57GB total, 100% GPU util, 8 samp/s, 0 OOMs
-# batch_size=24 causes ~15% OOM rate on long-video batches → 16 is optimal
+# Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed
+# Verified: bs=32, grad_ckpt=true, compile=false → 12 samp/s, 32GB peak, 100% GPU util
+# torch.compile + grad_ckpt = NaN; compile + no ckpt OOMs on long videos
 # =============================================================================
 
 stage: 1
@@ -23,7 +23,7 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: false
+  gradient_checkpointing: true
 
 data:
   train_shards:
@@ -38,8 +38,8 @@ data:
 
 training:
   total_samples: 1_000_000
-  batch_size: 16
-  grad_accum: 2
+  batch_size: 32
+  grad_accum: 1
   lr_connector: 3.0e-4
   lr_dino: 3.0e-6
   lr_llm: 3.0e-6
@@ -49,7 +49,7 @@ training:
   max_grad_norm: 1.0
   schedule: converging
   dtype: bfloat16
-  compile: true
+  compile: false
   seed: 42
 
 loss:
