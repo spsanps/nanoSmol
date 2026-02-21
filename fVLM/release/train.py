@@ -484,9 +484,13 @@ def train(cfg: dict, args):
     # ---- Gradient checkpointing (nanochat: trade compute for memory) ----
     if cfg["model"].get("gradient_checkpointing", False):
         if hasattr(raw_model, "enable_gradient_checkpointing"):
-            raw_model.enable_gradient_checkpointing()
+            # llm_only=True when compile_encoder is set (DINO can be compiled
+            # only if it doesn't use gradient checkpointing)
+            llm_only = cfg["training"].get("compile_encoder", False)
+            raw_model.enable_gradient_checkpointing(llm_only=llm_only)
             if is_main_process():
-                print("  Gradient checkpointing: enabled")
+                mode = "LLM only" if llm_only else "LLM + DINO"
+                print(f"  Gradient checkpointing: {mode}")
 
     # ---- Optimizer (differential LR) ----
     param_groups = raw_model.get_param_groups(
@@ -578,6 +582,14 @@ def train(cfg: dict, args):
         raw_model.llm = torch.compile(raw_model.llm, mode=compile_mode, dynamic=True)
         raw_model.dino_to_llm = torch.compile(raw_model.dino_to_llm, mode=compile_mode)
         raw_model.llm_to_query = torch.compile(raw_model.llm_to_query, mode=compile_mode)
+    elif cfg["training"].get("compile_encoder", False) and hasattr(torch, "compile"):
+        # Selective compile: DINO encoder only. Safe with gradient checkpointing
+        # because DINO doesn't use grad_ckpt when llm_only=True.
+        # DINO has fixed 224×224 inputs → dynamic=False for better optimization.
+        compile_mode = cfg["training"].get("compile_mode", "reduce-overhead")
+        if is_main_process():
+            print(f"  Compiling DINO encoder only with torch.compile ({compile_mode}) ...")
+        raw_model.encoder = torch.compile(raw_model.encoder, mode=compile_mode, dynamic=False)
 
     # ---- Val loader ----
     val_loader = build_val_loader(cfg)

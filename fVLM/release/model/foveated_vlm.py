@@ -348,8 +348,13 @@ class FoveatedVLM(nn.Module):
         """
         Two-pass parallel training forward.
 
-        Pass 1 (coarse): q_static -> all frames -> z_coarse -> LLM -> dynamic queries
+        Pass 1 (coarse): q_static -> all frames -> z_coarse -> LLM(visual only) -> queries
         Pass 2 (fine):   shifted queries -> all frames -> z_fine -> LLM + text -> loss
+
+        Optimization: the coarse LLM pass processes ONLY visual tokens (not text).
+        Because causal attention means visual positions never see text tokens,
+        removing text produces mathematically identical hidden states at visual
+        positions while reducing sequence length from T+S to T (~10-30x shorter).
 
         Parameters
         ----------
@@ -369,25 +374,19 @@ class FoveatedVLM(nn.Module):
         # ---- Step 0: Encode all frames (DINO, shared across both passes) ----
         kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
 
-        # ---- Pass 1: Coarse ----
+        # ---- Pass 1: Coarse (visual tokens ONLY — text is invisible to them) ----
         q_static = self.q_static.expand(B, -1)                     # [B, qd]
         z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat, patch_features)  # [B,T,dd]
         z_coarse_llm = self._project_visual(z_coarse)              # [B,T,ld]
 
-        # Build coarse sequence: [visual_coarse, text]
-        text_embeds = self._embed_text(input_ids)                  # [B,S,ld]
-        seq_coarse = torch.cat([z_coarse_llm, text_embeds], dim=1) # [B,T+S,ld]
-        # dtype handled by autocast on GPU; float32 on CPU
-
-        # LLM forward (backbone only, no lm_head yet)
-        out_coarse = self.llm.model(inputs_embeds=seq_coarse)
-        h_coarse = out_coarse.last_hidden_state                    # [B,T+S,ld]
+        # Coarse LLM: process ONLY visual tokens (T tokens, not T+S).
+        # Causal attention: visual pos i only sees visual pos 0..i, never text.
+        # This is ~30x faster for typical T=8, S=256 batches.
+        out_coarse = self.llm.model(inputs_embeds=z_coarse_llm)
+        h_coarse = out_coarse.last_hidden_state                    # [B,T,ld]
 
         # Extract dynamic queries from visual positions
-        # h_coarse[:, 0..T-1] are the hidden states at visual token positions
-        # Each one generates a query for the corresponding frame
-        h_visual_coarse = h_coarse[:, :T, :]                      # [B,T,ld]
-        queries = self.llm_to_query(h_visual_coarse)               # [B,T,qd]
+        queries = self.llm_to_query(h_coarse)                      # [B,T,qd]
 
         # Shift queries: frame t gets query from frame t-1; frame 0 gets q_init
         q_init = self.q_init.expand(B, 1, -1)                     # [B,1,qd]
@@ -398,8 +397,8 @@ class FoveatedVLM(nn.Module):
         z_fine_llm = self._project_visual(z_fine)                  # [B,T,ld]
 
         # Build fine sequence: [visual_fine, text]
+        text_embeds = self._embed_text(input_ids)                  # [B,S,ld]
         seq_fine = torch.cat([z_fine_llm, text_embeds], dim=1)     # [B,T+S,ld]
-        # dtype handled by autocast on GPU; float32 on CPU
 
         out_fine = self.llm.model(inputs_embeds=seq_fine)
         h_fine = out_fine.last_hidden_state                        # [B,T+S,ld]
@@ -408,8 +407,6 @@ class FoveatedVLM(nn.Module):
         logits_full = self.llm.lm_head(h_fine)                    # [B,T+S,V]
 
         # ---- Loss on text portion only ----
-        # The text tokens start at position T in the sequence.
-        # We need labels aligned with the full sequence: visual positions get pad.
         pad_id = self._get_pad_token_id()
         visual_pad = torch.full(
             (B, T), pad_id, dtype=input_ids.dtype, device=input_ids.device,
@@ -423,9 +420,8 @@ class FoveatedVLM(nn.Module):
             )
             full_loss_mask = torch.cat([visual_no_loss, loss_mask], dim=1)  # [B,T+S]
         else:
-            # Default: compute loss on all text positions that are not padding
             visual_no_loss = torch.zeros(B, T, dtype=attention_mask.dtype, device=attention_mask.device)
-            text_loss_mask = attention_mask  # non-pad text positions
+            text_loss_mask = attention_mask
             full_loss_mask = torch.cat([visual_no_loss, text_loss_mask], dim=1)
 
         fine_loss = self._ce_loss(logits_full, full_labels, full_loss_mask)
@@ -433,7 +429,10 @@ class FoveatedVLM(nn.Module):
         # ---- Optional auxiliary coarse loss ----
         coarse_loss = torch.tensor(0.0, device=frames.device)
         if self.lambda_coarse > 0:
-            logits_coarse = self.llm.lm_head(h_coarse)
+            # For coarse loss, need full coarse forward with text (expensive path)
+            seq_coarse_full = torch.cat([z_coarse_llm, text_embeds], dim=1)
+            out_coarse_full = self.llm.model(inputs_embeds=seq_coarse_full)
+            logits_coarse = self.llm.lm_head(out_coarse_full.last_hidden_state)
             coarse_loss = self._ce_loss(logits_coarse, full_labels, full_loss_mask)
 
         # ---- Combined loss ----
@@ -492,20 +491,18 @@ class FoveatedVLM(nn.Module):
         # ---- Step 0: Encode all frames (DINO, shared across chosen & rejected) ----
         kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
 
-        # ---- Coarse pass (shared, used for dynamic query generation) ----
+        # ---- Coarse pass (visual tokens ONLY — text invisible in causal attn) ----
         q_static = self.q_static.expand(B, -1)                          # [B, qd]
         z_coarse = self._query_all_frames(q_static, kv_cache, B, T, mask_flat, patch_features)
         z_coarse_llm = self._project_visual(z_coarse)                    # [B, T, ld]
 
-        # Run coarse LLM to get dynamic queries (use chosen text for query generation)
-        text_embeds_chosen = self._embed_text(chosen_input_ids)          # [B, S_c, ld]
-        seq_coarse = torch.cat([z_coarse_llm, text_embeds_chosen], dim=1)
-        out_coarse = self.llm.model(inputs_embeds=seq_coarse)
-        h_coarse = out_coarse.last_hidden_state
+        # Coarse LLM: visual tokens only (T, not T+S_c). Causal attention means
+        # visual positions never see text, so this is mathematically identical.
+        out_coarse = self.llm.model(inputs_embeds=z_coarse_llm)
+        h_coarse = out_coarse.last_hidden_state                          # [B, T, ld]
 
         # Extract dynamic queries from visual positions
-        h_visual_coarse = h_coarse[:, :T, :]                            # [B, T, ld]
-        queries = self.llm_to_query(h_visual_coarse)                     # [B, T, qd]
+        queries = self.llm_to_query(h_coarse)                            # [B, T, qd]
 
         q_init = self.q_init.expand(B, 1, -1)
         shifted_queries = torch.cat([q_init, queries[:, :-1]], dim=1)    # [B, T, qd]
@@ -515,6 +512,7 @@ class FoveatedVLM(nn.Module):
         z_fine_llm = self._project_visual(z_fine)                        # [B, T, ld]
 
         # ---- Forward on CHOSEN ----
+        text_embeds_chosen = self._embed_text(chosen_input_ids)          # [B, S_c, ld]
         seq_chosen = torch.cat([z_fine_llm, text_embeds_chosen], dim=1)  # [B, T+S_c, ld]
         out_chosen = self.llm.model(inputs_embeds=seq_chosen)
         chosen_logits = self.llm.lm_head(out_chosen.last_hidden_state)  # [B, T+S_c, V]
@@ -817,10 +815,17 @@ class FoveatedVLM(nn.Module):
     # Utility methods for external callers (train.py, eval.py)
     # ------------------------------------------------------------------
 
-    def enable_gradient_checkpointing(self) -> None:
-        """Turn on activation checkpointing for LLM and DINO."""
+    def enable_gradient_checkpointing(self, llm_only: bool = False) -> None:
+        """Turn on activation checkpointing for LLM (and optionally DINO).
+
+        Args:
+            llm_only: If True, only enable for LLM backbone. Leave DINO
+                      un-checkpointed so it can be safely torch.compiled.
+                      DINO is small (22M params) so checkpointing saves
+                      little memory there.
+        """
         self.llm.gradient_checkpointing_enable()
-        if hasattr(self.encoder.dino, 'gradient_checkpointing_enable'):
+        if not llm_only and hasattr(self.encoder.dino, 'gradient_checkpointing_enable'):
             self.encoder.dino.gradient_checkpointing_enable()
 
     def get_param_groups(

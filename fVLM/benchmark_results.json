@@ -1,0 +1,663 @@
+{
+  "val_10k": {
+    "coarse_only": {
+      "avg_loss": 1.879,
+      "samples": 1000
+    },
+    "coarse_fine": {
+      "avg_loss": 1.5327,
+      "samples": 1000
+    },
+    "autoregressive": {
+      "avg_loss": 1.5308,
+      "samples": 1000
+    }
+  },
+  "mvbench": {
+    "coarse_only": {
+      "accuracy": 27.39473684210526,
+      "correct": 1041,
+      "total": 3800,
+      "per_category": {
+        "action_count": {
+          "accuracy": 34.5,
+          "correct": 69,
+          "total": 200
+        },
+        "character_order": {
+          "accuracy": 35.5,
+          "correct": 71,
+          "total": 200
+        },
+        "counterfactual_inference": {
+          "accuracy": 37.5,
+          "correct": 75,
+          "total": 200
+        },
+        "fine_grained_action": {
+          "accuracy": 26.0,
+          "correct": 52,
+          "total": 200
+        },
+        "moving_attribute": {
+          "accuracy": 26.5,
+          "correct": 53,
+          "total": 200
+        },
+        "moving_count": {
+          "accuracy": 26.0,
+          "correct": 52,
+          "total": 200
+        },
+        "unexpected_action": {
+          "accuracy": 30.0,
+          "correct": 60,
+          "total": 200
+        },
+        "action_prediction": {
+          "accuracy": 22.0,
+          "correct": 44,
+          "total": 200
+        },
+        "action_sequence": {
+          "accuracy": 24.0,
+          "correct": 48,
+          "total": 200
+        },
+        "moving_direction": {
+          "accuracy": 27.0,
+          "correct": 54,
+          "total": 200
+        },
+        "object_existence": {
+          "accuracy": 18.0,
+          "correct": 36,
+          "total": 200
+        },
+        "object_interaction": {
+          "accuracy": 25.5,
+          "correct": 51,
+          "total": 200
+        },
+        "object_shuffle": {
+          "accuracy": 35.0,
+          "correct": 70,
+          "total": 200
+        },
+        "state_change": {
+          "accuracy": 19.0,
+          "correct": 38,
+          "total": 200
+        },
+        "action_antonym": {
+          "accuracy": 37.5,
+          "correct": 75,
+          "total": 200
+        },
+        "action_localization": {
+          "accuracy": 25.0,
+          "correct": 50,
+          "total": 200
+        },
+        "scene_transition": {
+          "accuracy": 28.499999999999996,
+          "correct": 57,
+          "total": 200
+        },
+        "egocentric_navigation": {
+          "accuracy": 23.0,
+          "correct": 46,
+          "total": 200
+        },
+        "episodic_reasoning": {
+          "accuracy": 20.0,
+          "correct": 40,
+          "total": 200
+        }
+      }
+    },
+    "coarse_fine": {
+      "accuracy": 28.02631578947368,
+      "correct": 1065,
+      "total": 3800,
+      "per_category": {
+        "action_count": {
+          "accuracy": 32.5,
+          "correct": 65,
+          "total": 200
+        },
+        "character_order": {
+          "accuracy": 30.0,
+          "correct": 60,
+          "total": 200
+        },
+        "counterfactual_inference": {
+          "accuracy": 31.0,
+          "correct": 62,
+          "total": 200
+        },
+        "fine_grained_action": {
+          "accuracy": 24.0,
+          "correct": 48,
+          "total": 200
+        },
+        "moving_attribute": {
+          "accuracy": 30.0,
+          "correct": 60,
+          "total": 200
+        },
+        "moving_count": {
+          "accuracy": 25.5,
+          "correct": 51,
+          "total": 200
+        },
+        "unexpected_action": {
+          "accuracy": 27.0,
+          "correct": 54,
+          "total": 200
+        },
+        "action_prediction": {
+          "accuracy": 22.0,
+          "correct": 44,
+          "total": 200
+        },
+        "action_sequence": {
+          "accuracy": 26.0,
+          "correct": 52,
+          "total": 200
+        },
+        "moving_direction": {
+          "accuracy": 27.0,
+          "correct": 54,
+          "total": 200
+        },
+        "object_existence": {
+          "accuracy": 31.5,
+          "correct": 63,
+          "total": 200
+        },
+        "object_interaction": {
+          "accuracy": 19.0,
+          "correct": 38,
+          "total": 200
+        },
+        "object_shuffle": {
+          "accuracy": 31.5,
+          "correct": 63,
+          "total": 200
+        },
+        "state_change": {
+          "accuracy": 25.0,
+          "correct": 50,
+          "total": 200
+        },
+        "action_antonym": {
+          "accuracy": 43.0,
+          "correct": 86,
+          "total": 200
+        },
+        "action_localization": {
+          "accuracy": 31.0,
+          "correct": 62,
+          "total": 200
+        },
+        "scene_transition": {
+          "accuracy": 29.5,
+          "correct": 59,
+          "total": 200
+        },
+        "egocentric_navigation": {
+          "accuracy": 21.5,
+          "correct": 43,
+          "total": 200
+        },
+        "episodic_reasoning": {
+          "accuracy": 25.5,
+          "correct": 51,
+          "total": 200
+        }
+      }
+    },
+    "autoregressive": {
+      "accuracy": 27.94736842105263,
+      "correct": 1062,
+      "total": 3800,
+      "per_category": {
+        "action_count": {
+          "accuracy": 32.5,
+          "correct": 65,
+          "total": 200
+        },
+        "character_order": {
+          "accuracy": 28.999999999999996,
+          "correct": 58,
+          "total": 200
+        },
+        "counterfactual_inference": {
+          "accuracy": 29.5,
+          "correct": 59,
+          "total": 200
+        },
+        "fine_grained_action": {
+          "accuracy": 24.5,
+          "correct": 49,
+          "total": 200
+        },
+        "moving_attribute": {
+          "accuracy": 30.0,
+          "correct": 60,
+          "total": 200
+        },
+        "moving_count": {
+          "accuracy": 26.0,
+          "correct": 52,
+          "total": 200
+        },
+        "unexpected_action": {
+          "accuracy": 27.0,
+          "correct": 54,
+          "total": 200
+        },
+        "action_prediction": {
+          "accuracy": 23.0,
+          "correct": 46,
+          "total": 200
+        },
+        "action_sequence": {
+          "accuracy": 28.499999999999996,
+          "correct": 57,
+          "total": 200
+        },
+        "moving_direction": {
+          "accuracy": 28.999999999999996,
+          "correct": 58,
+          "total": 200
+        },
+        "object_existence": {
+          "accuracy": 29.5,
+          "correct": 59,
+          "total": 200
+        },
+        "object_interaction": {
+          "accuracy": 19.0,
+          "correct": 38,
+          "total": 200
+        },
+        "object_shuffle": {
+          "accuracy": 32.0,
+          "correct": 64,
+          "total": 200
+        },
+        "state_change": {
+          "accuracy": 24.0,
+          "correct": 48,
+          "total": 200
+        },
+        "action_antonym": {
+          "accuracy": 41.5,
+          "correct": 83,
+          "total": 200
+        },
+        "action_localization": {
+          "accuracy": 30.0,
+          "correct": 60,
+          "total": 200
+        },
+        "scene_transition": {
+          "accuracy": 30.0,
+          "correct": 60,
+          "total": 200
+        },
+        "egocentric_navigation": {
+          "accuracy": 20.5,
+          "correct": 41,
+          "total": 200
+        },
+        "episodic_reasoning": {
+          "accuracy": 25.5,
+          "correct": 51,
+          "total": 200
+        }
+      }
+    }
+  },
+  "video_mme": {
+    "coarse_only": {
+      "accuracy": 26.222222222222225,
+      "correct": 708,
+      "total": 2700,
+      "per_category": {
+        "Counting Problem": {
+          "accuracy": 24.253731343283583,
+          "correct": 65,
+          "total": 268
+        },
+        "Information Synopsis": {
+          "accuracy": 24.458204334365323,
+          "correct": 79,
+          "total": 323
+        },
+        "Action Reasoning": {
+          "accuracy": 28.07017543859649,
+          "correct": 80,
+          "total": 285
+        },
+        "Attribute Perception": {
+          "accuracy": 23.873873873873876,
+          "correct": 53,
+          "total": 222
+        },
+        "Object Reasoning": {
+          "accuracy": 24.88986784140969,
+          "correct": 113,
+          "total": 454
+        },
+        "Temporal Reasoning": {
+          "accuracy": 21.468926553672315,
+          "correct": 38,
+          "total": 177
+        },
+        "Action Recognition": {
+          "accuracy": 29.39297124600639,
+          "correct": 92,
+          "total": 313
+        },
+        "OCR Problems": {
+          "accuracy": 28.776978417266186,
+          "correct": 40,
+          "total": 139
+        },
+        "Spatial Perception": {
+          "accuracy": 18.51851851851852,
+          "correct": 10,
+          "total": 54
+        },
+        "Object Recognition": {
+          "accuracy": 28.24858757062147,
+          "correct": 100,
+          "total": 354
+        },
+        "Temporal Perception": {
+          "accuracy": 36.36363636363637,
+          "correct": 20,
+          "total": 55
+        },
+        "Spatial Reasoning": {
+          "accuracy": 32.142857142857146,
+          "correct": 18,
+          "total": 56
+        }
+      }
+    },
+    "coarse_fine": {
+      "accuracy": 29.48148148148148,
+      "correct": 796,
+      "total": 2700,
+      "per_category": {
+        "Counting Problem": {
+          "accuracy": 32.83582089552239,
+          "correct": 88,
+          "total": 268
+        },
+        "Information Synopsis": {
+          "accuracy": 32.50773993808049,
+          "correct": 105,
+          "total": 323
+        },
+        "Action Reasoning": {
+          "accuracy": 31.929824561403507,
+          "correct": 91,
+          "total": 285
+        },
+        "Attribute Perception": {
+          "accuracy": 28.82882882882883,
+          "correct": 64,
+          "total": 222
+        },
+        "Object Reasoning": {
+          "accuracy": 29.955947136563875,
+          "correct": 136,
+          "total": 454
+        },
+        "Temporal Reasoning": {
+          "accuracy": 33.89830508474576,
+          "correct": 60,
+          "total": 177
+        },
+        "Action Recognition": {
+          "accuracy": 28.753993610223645,
+          "correct": 90,
+          "total": 313
+        },
+        "OCR Problems": {
+          "accuracy": 23.741007194244602,
+          "correct": 33,
+          "total": 139
+        },
+        "Spatial Perception": {
+          "accuracy": 25.925925925925924,
+          "correct": 14,
+          "total": 54
+        },
+        "Object Recognition": {
+          "accuracy": 22.598870056497177,
+          "correct": 80,
+          "total": 354
+        },
+        "Temporal Perception": {
+          "accuracy": 36.36363636363637,
+          "correct": 20,
+          "total": 55
+        },
+        "Spatial Reasoning": {
+          "accuracy": 26.785714285714285,
+          "correct": 15,
+          "total": 56
+        }
+      }
+    },
+    "autoregressive": {
+      "accuracy": 28.666666666666668,
+      "correct": 774,
+      "total": 2700,
+      "per_category": {
+        "Counting Problem": {
+          "accuracy": 31.343283582089555,
+          "correct": 84,
+          "total": 268
+        },
+        "Information Synopsis": {
+          "accuracy": 30.959752321981426,
+          "correct": 100,
+          "total": 323
+        },
+        "Action Reasoning": {
+          "accuracy": 31.57894736842105,
+          "correct": 90,
+          "total": 285
+        },
+        "Attribute Perception": {
+          "accuracy": 27.47747747747748,
+          "correct": 61,
+          "total": 222
+        },
+        "Object Reasoning": {
+          "accuracy": 30.396475770925107,
+          "correct": 138,
+          "total": 454
+        },
+        "Temporal Reasoning": {
+          "accuracy": 31.63841807909605,
+          "correct": 56,
+          "total": 177
+        },
+        "Action Recognition": {
+          "accuracy": 28.434504792332266,
+          "correct": 89,
+          "total": 313
+        },
+        "OCR Problems": {
+          "accuracy": 23.741007194244602,
+          "correct": 33,
+          "total": 139
+        },
+        "Spatial Perception": {
+          "accuracy": 25.925925925925924,
+          "correct": 14,
+          "total": 54
+        },
+        "Object Recognition": {
+          "accuracy": 22.316384180790962,
+          "correct": 79,
+          "total": 354
+        },
+        "Temporal Perception": {
+          "accuracy": 27.27272727272727,
+          "correct": 15,
+          "total": 55
+        },
+        "Spatial Reasoning": {
+          "accuracy": 26.785714285714285,
+          "correct": 15,
+          "total": 56
+        }
+      }
+    }
+  },
+  "pope": {
+    "coarse_only": {
+      "accuracy": 50.0,
+      "correct": 4500,
+      "total": 9000,
+      "per_category": {
+        "adversarial": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        },
+        "popular": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        },
+        "random": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        }
+      }
+    },
+    "coarse_fine": {
+      "accuracy": 50.0,
+      "correct": 4500,
+      "total": 9000,
+      "per_category": {
+        "adversarial": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        },
+        "popular": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        },
+        "random": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        }
+      }
+    },
+    "autoregressive": {
+      "accuracy": 50.0,
+      "correct": 4500,
+      "total": 9000,
+      "per_category": {
+        "adversarial": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        },
+        "popular": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        },
+        "random": {
+          "accuracy": 50.0,
+          "correct": 1500,
+          "total": 3000
+        }
+      }
+    }
+  },
+  "scienceqa": {
+    "coarse_only": {
+      "accuracy": 36.440257808626676,
+      "correct": 735,
+      "total": 2017,
+      "per_category": {
+        "natural science": {
+          "accuracy": 41.521918941273775,
+          "correct": 502,
+          "total": 1209
+        },
+        "social science": {
+          "accuracy": 27.486910994764397,
+          "correct": 210,
+          "total": 764
+        },
+        "language science": {
+          "accuracy": 52.27272727272727,
+          "correct": 23,
+          "total": 44
+        }
+      }
+    },
+    "coarse_fine": {
+      "accuracy": 35.59742191373327,
+      "correct": 718,
+      "total": 2017,
+      "per_category": {
+        "natural science": {
+          "accuracy": 40.86021505376344,
+          "correct": 494,
+          "total": 1209
+        },
+        "social science": {
+          "accuracy": 26.701570680628272,
+          "correct": 204,
+          "total": 764
+        },
+        "language science": {
+          "accuracy": 45.45454545454545,
+          "correct": 20,
+          "total": 44
+        }
+      }
+    },
+    "autoregressive": {
+      "accuracy": 35.399107585523055,
+      "correct": 714,
+      "total": 2017,
+      "per_category": {
+        "natural science": {
+          "accuracy": 40.69478908188586,
+          "correct": 492,
+          "total": 1209
+        },
+        "social science": {
+          "accuracy": 26.439790575916227,
+          "correct": 202,
+          "total": 764
+        },
+        "language science": {
+          "accuracy": 45.45454545454545,
+          "correct": 20,
+          "total": 44
+        }
+      }
+    }
+  }
+}
