@@ -6,7 +6,7 @@ instruction-following capability.  Removing it hurts 3.7-6.5% on language
 benchmarks (see docs/runpod/SMOLVLM2_REFERENCE.md).
 
 Usage:
-    from release.data.text_interleave import InterleavedDataLoader
+    from text_interleave import InterleavedDataLoader
 
     loader = InterleavedDataLoader(
         vision_loader=vision_dl,

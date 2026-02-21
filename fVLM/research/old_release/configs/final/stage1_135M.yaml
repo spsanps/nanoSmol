@@ -1,0 +1,68 @@
+# =============================================================================
+# FINAL Stage 1: Visual Alignment — 135M
+# =============================================================================
+# Model: SmolLM2-135M-Instruct + DINOv2-small (157.6M total params)
+# Loss: All-text CE (predict all tokens)
+# LR: Converging schedule: connector=1e-3 → 3e-5, backbone=1e-5 → 3e-5
+# Data: OpenVid-1M (905K) + WebVid (19K) + 14% SmolTalk S1 text retention
+# Prompt: Honest conditioning ("What would be the WebVid caption?")
+# Text retention: Proper chat format (not wrapped in WebVid prompt)
+# =============================================================================
+
+stage: 1
+
+model:
+  llm: /workspace/models/SmolLM2-135M-Instruct
+  dino: /workspace/models/dinov2-small
+  deep_query: true
+  query_dim: 384
+  visual_scale: 0.14
+  lambda_coarse: 0.0
+  gradient_checkpointing: false
+
+data:
+  train_shards:
+    - "/workspace/data/openvid/*.tar"
+    - "/workspace/data/webvid/*.tar"
+  val_shards: "/workspace/data/eval/val_10k/*.tar"
+  text_shards: "/workspace/data/text_retention/stage1/*.tar"
+  text_ratio: 0.14
+  max_frames: 64
+  frame_size: 224
+  num_workers: 6
+  prefetch_factor: 4
+
+training:
+  total_samples: 1_000_000
+  batch_size: 8
+  grad_accum: 4
+  lr_connector: 1.0e-3
+  lr_dino: 1.0e-5
+  lr_llm: 1.0e-5
+  target_lr: 3.0e-5
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  schedule: converging
+  dtype: bfloat16
+  compile: false
+  seed: 42
+
+loss:
+  type: text_ce_all
+
+checkpoint:
+  save_dir: /workspace/checkpoints/final/stage1
+  save_every_steps: 1000
+  keep_last: 2
+  keep_best: 1
+  metric: val_loss
+  resume: auto
+
+eval:
+  every_steps: 500
+  max_samples: 1000
+
+wandb:
+  project: foveated-vlm-final
+  run_name: stage1-135M

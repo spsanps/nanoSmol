@@ -1,12 +1,11 @@
 """
-Release utility modules for foveated VLM training.
+Training utilities for foveated VLM.
 
-Components:
 - distributed: DDP process group setup and rank helpers
-- checkpoint: Save/load/cleanup training checkpoints with best-metric tracking
-- lr_schedule: Cosine decay with linear warmup
+- checkpoint: Save/load training state with best-metric tracking
+- lr_schedule: Cosine decay with linear warmup, converging schedule
 - logging_utils: Unified wandb + CSV + stdout logging (rank-0 only)
-- flop_counter: Per-sample FLOP estimation for throughput reporting
+- attention_viz: Attention entropy computation and heatmap saving
 """
 
 from release.utils.distributed import (
@@ -21,7 +20,7 @@ from release.utils.checkpoint import (
 )
 from release.utils.lr_schedule import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup, get_converging_schedule
 from release.utils.logging_utils import TrainingLogger
-from release.utils.flop_counter import estimate_flops_per_sample
+from release.utils.attention_viz import compute_attention_entropy, save_attention_maps
 
 __all__ = [
     "setup_distributed",
@@ -34,5 +33,6 @@ __all__ = [
     "get_constant_schedule_with_warmup",
     "get_converging_schedule",
     "TrainingLogger",
-    "estimate_flops_per_sample",
+    "compute_attention_entropy",
+    "save_attention_maps",
 ]

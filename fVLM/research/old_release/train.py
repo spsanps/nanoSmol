@@ -40,7 +40,6 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from release.model import FoveatedVLM
-from release.model.multi_token_vlm import MultiTokenVLM
 from release.data.webdataset_loader import make_dataloader, make_dynamic_dataloader, create_dpo_webdataset
 from release.data.collate import collate_dpo
 from release.data.text_interleave import InterleavedDataLoader
@@ -80,17 +79,7 @@ def load_config(path: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 def build_model(cfg: dict, device: torch.device):
-    if cfg["model"].get("multi_token", False):
-        model = MultiTokenVLM(
-            llm_name=cfg["model"]["llm"],
-            dino_name=cfg["model"]["dino"],
-            tokens_per_frame=cfg["model"].get("tokens_per_frame", 16),
-            visual_scale=cfg["model"].get("visual_scale", 0.14),
-        )
-        if is_main_process():
-            print(f"  Model: MultiTokenVLM ({cfg['model'].get('tokens_per_frame', 16)} tokens/frame)")
-    else:
-        model = FoveatedVLM(
+    model = FoveatedVLM(
             llm_name=cfg["model"]["llm"],
             dino_name=cfg["model"]["dino"],
             query_dim=cfg["model"].get("query_dim", 384),
