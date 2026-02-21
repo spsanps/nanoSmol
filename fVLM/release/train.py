@@ -604,16 +604,12 @@ def train(cfg: dict, args):
             print(f"  Compiling model with torch.compile ({compile_mode}) ...")
         # Compile individual components to avoid graph breaks at boundaries
         fullgraph_encoder = cfg["training"].get("fullgraph_encoder", True)
-        shape_padding = cfg["training"].get("shape_padding", False)
-        llm_compile_opts = {"shape_padding": True} if shape_padding else {}
         # DINO encoder: fixed 224x224 inputs → dynamic=False, fullgraph for max optimization
         raw_model.encoder = torch.compile(
             raw_model.encoder, mode=compile_mode, dynamic=False, fullgraph=fullgraph_encoder,
         )
-        # LLM: variable sequence length → dynamic=True, shape_padding for Tensor Core alignment
-        raw_model.llm = torch.compile(
-            raw_model.llm, mode=compile_mode, dynamic=True, options=llm_compile_opts,
-        )
+        # LLM: variable sequence length → dynamic=True
+        raw_model.llm = torch.compile(raw_model.llm, mode=compile_mode, dynamic=True)
         raw_model.dino_to_llm = torch.compile(raw_model.dino_to_llm, mode=compile_mode)
         raw_model.llm_to_query = torch.compile(raw_model.llm_to_query, mode=compile_mode)
     elif cfg["training"].get("compile_encoder", False) and hasattr(torch, "compile"):

@@ -9,8 +9,9 @@
 # Text retention: Proper chat format (not wrapped in WebVid prompt)
 #
 # LR scaling: 1/sqrt(1711/135) ~ 0.28x from 135M (mu-parametrization inspired)
-# Memory: A100 80GB — bf16, no grad ckpt, ~35.5GB peak at bs=32
-# Profiled: 53.1 samp/s at bs=32, 59.7 at bs=48 (synthetic data)
+# Memory: A100 80GB — bf16, no grad ckpt
+# max-autotune causes CUDAGraph overhead with dynamic shapes → use default
+# max_total_frames=256: real data batches with 300+ frames OOM at 1.7B
 # =============================================================================
 
 stage: 1
@@ -40,8 +41,8 @@ training:
   batch_size: 32
   grad_accum: 1
   dynamic_batching: true
-  max_total_frames: 512
-  max_batch_size: 48
+  max_total_frames: 256
+  max_batch_size: 32
   lr_connector: 3.0e-4
   lr_dino: 3.0e-6
   lr_llm: 3.0e-6
@@ -52,7 +53,7 @@ training:
   schedule: converging
   dtype: bfloat16
   compile: true
-  compile_mode: max-autotune
+  compile_mode: default
   seed: 42
 
 loss:
