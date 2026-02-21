@@ -184,15 +184,10 @@ def main():
     del model, opt; cleanup()
 
     # ── Test 3: Liger Kernel FLCE ──
-    if HAS_LIGER:
-        print("\n\n" + "="*70)
-        print("TEST 3: Liger Kernel FLCE (no grad ckpt)")
-        print("="*70)
-        model = create_model(grad_ckpt=False, use_fused_ce=True)
-        opt = create_optimizer(model)
-        r = profile_config("liger_flce", model, opt, batch_size=8)
-        results.append(r)
-        del model, opt; cleanup()
+    # SKIPPED: LigerFusedLinearCrossEntropyLoss crashes with Triton 3.0.0 + PyTorch 2.4.1
+    # (illegal memory access). LigerCrossEntropyLoss works but doesn't avoid logits materialization.
+    # Revisit when Triton/Liger versions are updated.
+    print("\n  SKIPPED: Liger FLCE (incompatible with Triton 3.0.0)")
 
     # ── Test 4: torch.compile default (no grad ckpt) ──
     print("\n\n" + "="*70)
@@ -240,31 +235,30 @@ def main():
         results.append({"name": "no_ckpt_bs32", "error": "OOM"})
     del model, opt; cleanup()
 
-    # ── Test 8: Combined best (Liger + no ckpt + compile + larger batch) ──
-    if HAS_LIGER:
-        print("\n\n" + "="*70)
-        print("TEST 8: Combined (Liger + no ckpt + compile default + bs=16)")
-        print("="*70)
-        model = create_model(grad_ckpt=False, use_fused_ce=True)
-        opt = create_optimizer(model)
-        r = profile_config("combined_best_bs16", model, opt, batch_size=16,
+    # ── Test 8: Combined best (no ckpt + compile + larger batch) ──
+    print("\n\n" + "="*70)
+    print("TEST 8: Combined (no ckpt + compile default + bs=16)")
+    print("="*70)
+    model = create_model(grad_ckpt=False)
+    opt = create_optimizer(model)
+    r = profile_config("combined_best_bs16", model, opt, batch_size=16,
+                       compile_model=True, compile_mode="default")
+    results.append(r)
+    del model, opt; cleanup()
+
+    print("\n\n" + "="*70)
+    print("TEST 9: Combined (no ckpt + compile default + bs=32)")
+    print("="*70)
+    model = create_model(grad_ckpt=False)
+    opt = create_optimizer(model)
+    try:
+        r = profile_config("combined_best_bs32", model, opt, batch_size=32,
                            compile_model=True, compile_mode="default")
         results.append(r)
-        del model, opt; cleanup()
-
-        print("\n\n" + "="*70)
-        print("TEST 9: Combined (Liger + no ckpt + compile default + bs=32)")
-        print("="*70)
-        model = create_model(grad_ckpt=False, use_fused_ce=True)
-        opt = create_optimizer(model)
-        try:
-            r = profile_config("combined_best_bs32", model, opt, batch_size=32,
-                               compile_model=True, compile_mode="default")
-            results.append(r)
-        except torch.cuda.OutOfMemoryError:
-            print("  OOM at batch_size=32 with combined optimizations")
-            results.append({"name": "combined_best_bs32", "error": "OOM"})
-        del model, opt; cleanup()
+    except torch.cuda.OutOfMemoryError:
+        print("  OOM at batch_size=32")
+        results.append({"name": "combined_best_bs32", "error": "OOM"})
+    del model, opt; cleanup()
 
     # ── Summary ──
     print("\n\n" + "="*70)

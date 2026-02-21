@@ -24,7 +24,6 @@ model:
   visual_scale: 0.14
   lambda_coarse: 0.0
   gradient_checkpointing: false
-  use_fused_ce: true
   init_from: /workspace/checkpoints/final_1.7B/stage1/best.pt
 
 data:
@@ -60,7 +59,7 @@ training:
   schedule: cosine
   dtype: bfloat16
   compile: true
-  compile_mode: default
+  compile_mode: max-autotune
   seed: 42
 
 loss:

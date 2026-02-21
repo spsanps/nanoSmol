@@ -722,8 +722,12 @@ def make_dynamic_dataloader(
         replicate_image_frames=replicate_image_frames,
     )
 
-    # The batcher forms variable-size batches and collates them internally
-    dataset = dataset.compose(token_budget_batcher(max_total_frames, max_batch_size))
+    # The batcher forms variable-size batches and collates them internally.
+    # length_bucket=True sorts by total length within a buffer to reduce padding waste.
+    dataset = dataset.compose(token_budget_batcher(
+        max_total_frames, max_batch_size,
+        length_bucket=True, bucket_buffer=max_batch_size * 4,
+    ))
 
     # batch_size=None: each dataset item is already a collated batch dict
     loader = torch.utils.data.DataLoader(

@@ -167,12 +167,17 @@ def collate_dpo(batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
 # Token-budget batcher (dynamic batch sizing by total frame count)
 # --------------------------------------------------------------------------- #
 
-def token_budget_batcher(max_total_frames: int = 512, max_batch_size: int = 64):
+def token_budget_batcher(max_total_frames: int = 512, max_batch_size: int = 64,
+                         length_bucket: bool = False, bucket_buffer: int = 256):
     """
     WebDataset compositor that forms variable-size batches by capping total
     frames per batch.  Keeps GPU work roughly constant across batches:
       - Short videos (T=1): bs up to max_batch_size
       - Long videos (T=64): bs = max_total_frames // 64 = 8
+
+    When length_bucket=True, buffers `bucket_buffer` samples and sorts by
+    total sequence length (frames + text tokens) before forming batches.
+    This groups similar-length samples together, reducing padding waste.
 
     Usage in a WebDataset pipeline::
 
@@ -181,30 +186,42 @@ def token_budget_batcher(max_total_frames: int = 512, max_batch_size: int = 64):
     Each yielded item is a collated batch dict (same format as
     collate_foveated output), ready for the training loop.
     """
-    def _batcher(src):
+    def _form_batches(samples):
+        """Yield batches from a list of samples respecting frame budget."""
         batch = []
         total_frames = 0
-
-        for sample in src:
+        for sample in samples:
             t = sample["frames"].shape[0]
-
-            # If adding this sample would exceed budget and we have samples,
-            # yield the current batch first
             if total_frames + t > max_total_frames and batch:
                 yield collate_foveated(batch)
                 batch = []
                 total_frames = 0
-
             batch.append(sample)
             total_frames += t
-
-            # Also cap absolute batch size
             if len(batch) >= max_batch_size:
                 yield collate_foveated(batch)
                 batch = []
                 total_frames = 0
-
         if batch:
             yield collate_foveated(batch)
+
+    def _batcher(src):
+        if not length_bucket:
+            yield from _form_batches(src)
+            return
+
+        # Length-bucketed batching: buffer samples, sort by total length,
+        # then form batches. Similar-length samples end up together,
+        # minimizing padding waste within each batch.
+        buf = []
+        for sample in src:
+            buf.append(sample)
+            if len(buf) >= bucket_buffer:
+                buf.sort(key=lambda s: s["frames"].shape[0] + s["input_ids"].shape[0])
+                yield from _form_batches(buf)
+                buf = []
+        if buf:
+            buf.sort(key=lambda s: s["frames"].shape[0] + s["input_ids"].shape[0])
+            yield from _form_batches(buf)
 
     return _batcher

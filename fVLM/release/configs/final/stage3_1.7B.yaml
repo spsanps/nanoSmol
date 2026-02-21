@@ -48,7 +48,7 @@ training:
   schedule: cosine
   dtype: bfloat16
   compile: true
-  compile_mode: default
+  compile_mode: max-autotune
   seed: 42
 
 loss:

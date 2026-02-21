@@ -9,10 +9,8 @@
 # Text retention: Proper chat format (not wrapped in WebVid prompt)
 #
 # LR scaling: 1/sqrt(1711/135) ~ 0.28x from 135M (mu-parametrization inspired)
-# Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed
-# Optimized: coarse text skip + dynamic batching + compile + Liger FLCE
-# Liger Kernel FusedLinearCrossEntropyLoss: fuses lm_head + CE, saves ~2GB VRAM
-# No gradient checkpointing: saves 20-30% compute, fits in 80GB budget
+# Memory: A100 80GB — bf16, no grad ckpt, ~35.5GB peak at bs=32
+# Profiled: 53.1 samp/s at bs=32, 59.7 at bs=48 (synthetic data)
 # =============================================================================
 
 stage: 1
@@ -25,7 +23,6 @@ model:
   visual_scale: 0.14
   lambda_coarse: 0.0
   gradient_checkpointing: false
-  use_fused_ce: true
 
 data:
   train_shards:
@@ -43,8 +40,8 @@ training:
   batch_size: 32
   grad_accum: 1
   dynamic_batching: true
-  max_total_frames: 768
-  max_batch_size: 96
+  max_total_frames: 512
+  max_batch_size: 48
   lr_connector: 3.0e-4
   lr_dino: 3.0e-6
   lr_llm: 3.0e-6
@@ -55,7 +52,7 @@ training:
   schedule: converging
   dtype: bfloat16
   compile: true
-  compile_mode: default
+  compile_mode: max-autotune
   seed: 42
 
 loss:
@@ -68,8 +65,6 @@ checkpoint:
   keep_best: 1
   metric: train_loss
   resume: auto
-
-# No val eval — train loss only (all stages). No early stopping — full 1M samples.
 
 wandb:
   project: foveated-vlm-final

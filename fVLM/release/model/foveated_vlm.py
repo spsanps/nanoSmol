@@ -419,7 +419,12 @@ class FoveatedVLM(nn.Module):
         S = input_ids.shape[1]
 
         # ---- Step 0: Encode all frames (DINO, shared across both passes) ----
-        kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
+        # Use prefetched DINO results if available (from CUDA stream overlap)
+        prefetched = self._get_prefetched_dino()
+        if prefetched is not None:
+            kv_cache, patch_features, mask_flat = prefetched
+        else:
+            kv_cache, patch_features, mask_flat = self._encode_all_frames(frames, frame_mask)
 
         # ---- Pass 1: Coarse (visual tokens ONLY — text is invisible to them) ----
         q_static = self.q_static.expand(B, -1)                     # [B, qd]
@@ -875,6 +880,44 @@ class FoveatedVLM(nn.Module):
                 f"Unknown forward mode '{mode}'. "
                 "Expected one of: coarse_fine, coarse_only, autoregressive"
             )
+
+    # ------------------------------------------------------------------
+    # CUDA Stream Prefetch — overlap DINO encoding with LLM backward
+    # ------------------------------------------------------------------
+
+    def prefetch_dino(self, frames: torch.Tensor, frame_mask=None, stream=None):
+        """
+        Start DINO encoding on a separate CUDA stream.
+
+        Call this while the previous batch's backward pass is running.
+        The DINO encoder is frozen during training, so there's no gradient
+        dependency between the backward pass and this prefetch.
+
+        Args:
+            frames: [B, T, 3, 224, 224] next batch's frames
+            frame_mask: [B, T] bool, optional
+            stream: torch.cuda.Stream to run on (caller manages lifecycle)
+
+        Returns:
+            None — results are stored internally and retrieved via
+            forward_coarse_fine(..., prefetched_dino=True).
+        """
+        if stream is None:
+            stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            with torch.no_grad():
+                self._prefetched_dino = self._encode_all_frames(frames, frame_mask)
+                self._prefetch_stream = stream
+
+    def _get_prefetched_dino(self):
+        """Retrieve and clear prefetched DINO results, synchronizing the stream."""
+        if hasattr(self, '_prefetched_dino') and self._prefetched_dino is not None:
+            self._prefetch_stream.synchronize()
+            result = self._prefetched_dino
+            self._prefetched_dino = None
+            self._prefetch_stream = None
+            return result
+        return None
 
     # ------------------------------------------------------------------
     # Utility methods for external callers (train.py, eval.py)
