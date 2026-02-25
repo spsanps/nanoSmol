@@ -328,16 +328,15 @@ class FoveatedVLM(nn.Module):
 
         if loss_mask is not None:
             shift_mask = loss_mask[:, 1:].contiguous()   # [B, S-1]
-            # Replace masked positions with ignore_index so CE ignores them
-            pad_id = self._get_pad_token_id()
+            # Replace masked positions with -100 (standard PyTorch ignore_index)
             shift_labels = shift_labels.clone()
-            shift_labels[shift_mask == 0] = pad_id
+            shift_labels[shift_mask == 0] = -100
 
         V = shift_logits.shape[-1]
         loss = F.cross_entropy(
             shift_logits.reshape(-1, V),
             shift_labels.reshape(-1),
-            ignore_index=self._get_pad_token_id(),
+            ignore_index=-100,
             reduction="mean",
         )
         return loss
@@ -366,14 +365,14 @@ class FoveatedVLM(nn.Module):
 
         if loss_mask is not None:
             shift_mask = loss_mask[:, 1:].contiguous()
-            pad_id = self._get_pad_token_id()
+            # Replace masked positions with -100 (standard PyTorch ignore_index)
             shift_labels = shift_labels.clone()
-            shift_labels[shift_mask == 0] = pad_id
+            shift_labels[shift_mask == 0] = -100
 
         # Flatten for Liger: [B*(S-1), ld] and [B*(S-1)]
         BSminus1 = h_input.shape[0] * h_input.shape[1]
         return LigerFusedLinearCrossEntropyLoss(
-            ignore_index=self._get_pad_token_id()
+            ignore_index=-100
         )(
             h_input.reshape(BSminus1, -1),
             self.llm.lm_head.weight,
