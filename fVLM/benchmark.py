@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """
-fVLM-135M benchmark evaluation — v2 (truly batched, ~4x faster).
+fVLM benchmark evaluation (batched MCQ scoring).
 
-Key optimizations vs v1:
+Usage:
+    # 135M model
+    python benchmark.py --llm /workspace/models/SmolLM2-135M-Instruct \
+                        --checkpoint /workspace/checkpoints/final/stage3/best.pt
+
+    # 1.7B model
+    python benchmark.py --llm /workspace/models/SmolLM2-1.7B-Instruct \
+                        --checkpoint /workspace/checkpoints/final_1.7B/stage3/latest.pt
+
+    # Run specific benchmarks only
+    python benchmark.py --checkpoint ... --only MVBench ScienceQA
+
+Key optimizations:
   1. Batch all MCQ options into ONE forward pass per mode (not N sequential)
   2. Compute per-option CE from logits (avoid model's averaged loss)
   3. Cache DINO encoding across modes (same frames, reuse kv_cache)
@@ -22,21 +34,25 @@ from model import FoveatedVLM
 
 # ─── Model / tokenizer ──────────────────────────────────────────────
 
-def load_model(checkpoint_path, device="cuda"):
+def load_model(checkpoint_path, llm_name, dino_name="/workspace/models/dinov2-small",
+               device="cuda"):
     model = FoveatedVLM(
-        llm_name="/workspace/models/SmolLM2-135M-Instruct",
-        dino_name="/workspace/models/dinov2-small",
+        llm_name=llm_name, dino_name=dino_name,
         query_dim=384, visual_scale=0.14, lambda_coarse=0.0, deep_query=True,
     )
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    state_dict = ckpt["model_state_dict"]
+    # Strip torch.compile's _orig_mod prefix if present
+    if any("._orig_mod." in k for k in state_dict):
+        state_dict = {k.replace("._orig_mod", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     model = model.to(device).to(torch.bfloat16).eval()
     print(f"Loaded: {checkpoint_path} (step {ckpt.get('step', '?')})")
     return model
 
 
-def load_tokenizer():
-    tok = AutoTokenizer.from_pretrained("/workspace/models/SmolLM2-135M-Instruct")
+def load_tokenizer(llm_name):
+    tok = AutoTokenizer.from_pretrained(llm_name)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     return tok
@@ -326,25 +342,39 @@ def run_mcq_benchmark(model, tokenizer, name, shard_pattern, modes, device, all_
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="fVLM benchmark evaluation")
+    parser.add_argument("--llm", default="/workspace/models/SmolLM2-135M-Instruct",
+                        help="HuggingFace LLM path (e.g. SmolLM2-135M or 1.7B)")
+    parser.add_argument("--checkpoint", default="/workspace/checkpoints/final/stage3/best.pt",
+                        help="Path to model checkpoint (.pt)")
+    parser.add_argument("--dino", default="/workspace/models/dinov2-small",
+                        help="HuggingFace DINOv2 path")
     parser.add_argument("--only", nargs="+", default=None,
-                        help="Run only specified benchmarks (e.g. --only POPE ScienceQA)")
-    parser.add_argument("--output", default="/workspace/benchmark_results.json")
+                        help="Run only specified benchmarks (e.g. --only MVBench ScienceQA)")
+    parser.add_argument("--output", default=None,
+                        help="Output JSON path (default: /workspace/benchmark_results_{model}.json)")
     parser.add_argument("--merge", action="store_true",
                         help="Merge with existing results file instead of overwriting")
     args = parser.parse_args()
 
+    # Auto-detect model name for output file
+    model_name = os.path.basename(args.llm).replace("-Instruct", "").replace("SmolLM2-", "")
+    if args.output is None:
+        args.output = f"/workspace/benchmark_results_{model_name}.json"
+
     device = "cuda"
-    ckpt = "/workspace/checkpoints/final/stage3/best.pt"
     modes = ["coarse_only", "coarse_fine", "autoregressive"]
 
     print("=" * 70)
-    print("fVLM-135M BENCHMARK EVALUATION v3 (8-frame image replication)")
+    print(f"fVLM-{model_name} BENCHMARK EVALUATION")
+    print(f"  LLM:        {args.llm}")
+    print(f"  Checkpoint:  {args.checkpoint}")
+    print(f"  Output:      {args.output}")
     print("=" * 70)
 
     print("\nLoading model (bf16)...")
-    model = load_model(ckpt, device)
-    tokenizer = load_tokenizer()
+    model = load_model(args.checkpoint, args.llm, args.dino, device)
+    tokenizer = load_tokenizer(args.llm)
 
     # Load existing results if merging
     all_results = {}
@@ -360,8 +390,8 @@ def main():
         ("MVBench",   "/workspace/data/eval/benchmarks/mvbench_shards/mvbench_*.tar"),
         ("Video-MME", "/workspace/data/eval/benchmarks/video_mme_shards/video_mme_*.tar"),
         ("ScienceQA", "/workspace/data/eval/benchmarks/scienceqa_shards/scienceqa_*.tar"),
-        # POPE removed: 135M model always predicts same class → exact 50% (random baseline).
-        # Binary Y/N with 2-3 answer tokens is dominated by token prior, not visual grounding.
+        ("POPE",      "/workspace/data/eval/benchmarks/pope_shards/pope_*.tar"),
+        ("MLVU",      "/workspace/data/eval/benchmarks/mlvu_shards/mlvu_*.tar"),
     ]
 
     if args.only:
