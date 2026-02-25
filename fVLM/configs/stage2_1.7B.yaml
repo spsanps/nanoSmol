@@ -11,7 +11,8 @@
 #
 # LR scaling: 135M used 3e-5 -> 1.7B: 3e-5 * 0.28 ~ 1e-5
 # Memory: A100 80GB — bf16 weights + fp32 optimizer = ~20.8GB fixed
-# Optimized: Liger FLCE + no grad ckpt + compile + dynamic batching
+# Optimized: Liger FLCE + grad_ckpt (no compile — compile+grad_ckpt = NaN)
+# Previous run with compile=true+no_grad_ckpt had 51.6% OOM skip rate!
 # =============================================================================
 
 stage: 2
@@ -23,8 +24,8 @@ model:
   query_dim: 384
   visual_scale: 0.14
   lambda_coarse: 0.0
-  gradient_checkpointing: false
-  init_from: /workspace/checkpoints/final_1.7B/stage1/best.pt
+  gradient_checkpointing: true
+  init_from: /workspace/checkpoints/final_1.7B/stage1/latest.pt
 
 data:
   train_shards:
@@ -58,8 +59,8 @@ training:
   max_grad_norm: 1.0
   schedule: cosine
   dtype: bfloat16
-  compile: true
-  compile_mode: max-autotune
+  compile: false                   # compile + grad_ckpt = NaN (known); compile alone = 51.6% OOM skip
+  # compile_mode: max-autotune    # disabled
   seed: 42
 
 loss:

@@ -24,7 +24,7 @@ model:
   visual_scale: 0.14
   lambda_coarse: 0.0
   gradient_checkpointing: true
-  init_from: /workspace/checkpoints/final_1.7B/stage2/best.pt
+  init_from: /workspace/checkpoints/final_1.7B/stage2/latest.pt
 
 data:
   train_shards: "/workspace/data/rlaif_v/*.tar"
